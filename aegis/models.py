@@ -1,3 +1,5 @@
+# aegis/models.py
+
 import uuid
 
 from django.conf import settings
@@ -104,31 +106,31 @@ class RegisteredService(BaseModel):
         return self.service_name
 
 
-class AdminMenuMaster(BaseModel):
-    id = models.SmallAutoField(primary_key=True, db_column='id', db_index=True, editable=False, unique=True,
-                               blank=False, null=False, verbose_name='ID')
-    parent_id = models.ForeignKey('self', null=True, blank=True, related_name='submenus', db_column='parent_id',
-                                  on_delete=models.CASCADE)
-    menu_name = models.CharField(max_length=30, null=False, blank=False, unique=True,
-                                 validators=[RegexValidator(regex=r'^[a-zA-Z0-9()\s]+$', message="Invalid characters")])
-    menu_icon = models.CharField(max_length=20, null=True, blank=True, default='list',
-                                 validators=[RegexValidator(regex=r'^[a-z0-9-]+$', message="Invalid characters")])
-    menu_route = models.CharField(max_length=30, null=True, blank=True,
-                                  validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
-    menu_access = models.CharField(max_length=30, null=True, blank=True,
-                                   validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
-    menu_order = models.SmallIntegerField(null=True, blank=True,
-                                          validators=[RegexValidator(regex=r'^[0-9]+$', message="Invalid characters")])
-
-    history = HistoricalRecords(table_name="admin_menu_master_history")
-
-    class Meta:
-        db_table = "admin_menu_master"
-        verbose_name = "Admin Menu"
-        verbose_name_plural = "Admin Menus"
-
-    def __str__(self):
-        return f"{self.menu_name} ({self.menu_route})"
+# class AdminMenuMaster(BaseModel):
+#     id = models.SmallAutoField(primary_key=True, db_column='id', db_index=True, editable=False, unique=True,
+#                                blank=False, null=False, verbose_name='ID')
+#     parent_id = models.ForeignKey('self', null=True, blank=True, related_name='submenus', db_column='parent_id',
+#                                   on_delete=models.CASCADE)
+#     menu_name = models.CharField(max_length=30, null=False, blank=False, unique=True,
+#                                  validators=[RegexValidator(regex=r'^[a-zA-Z0-9()\s]+$', message="Invalid characters")])
+#     menu_icon = models.CharField(max_length=20, null=True, blank=True, default='list',
+#                                  validators=[RegexValidator(regex=r'^[a-z0-9-]+$', message="Invalid characters")])
+#     menu_route = models.CharField(max_length=30, null=True, blank=True,
+#                                   validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
+#     menu_access = models.CharField(max_length=30, null=True, blank=True,
+#                                    validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
+#     menu_order = models.SmallIntegerField(null=True, blank=True,
+#                                           validators=[RegexValidator(regex=r'^[0-9]+$', message="Invalid characters")])
+#
+#     history = HistoricalRecords(table_name="admin_menu_master_history")
+#
+#     class Meta:
+#         db_table = "admin_menu_master"
+#         verbose_name = "Admin Menu"
+#         verbose_name_plural = "Admin Menus"
+#
+#     def __str__(self):
+#         return f"{self.menu_name} ({self.menu_route})"
 
 
 class PermissionMaster(BaseModel):

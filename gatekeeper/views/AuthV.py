@@ -1,6 +1,9 @@
+# gatekeeper/views/AuthV.py
+
 import jwt
 import logging
 import os
+
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -15,6 +18,7 @@ from django.http import HttpResponseRedirect
 
 from gatekeeper.forms import LoginForm, RegisterForm, PasswordResetForm
 from aegis.models import DefaultAuthUserExtend
+
 
 logger = logging.getLogger('aegis')
 
