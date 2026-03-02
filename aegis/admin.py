@@ -1,3 +1,5 @@
+# aegis/admin.py
+
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin
 from django.utils.html import format_html

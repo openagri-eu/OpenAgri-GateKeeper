@@ -21,6 +21,7 @@ from aegis.utils.service_utils import match_endpoint
 
 LOG = logging.getLogger(__name__)
 
+
 class RegisterServiceAPIView(APIView):
     permission_classes = [IsAuthenticated]
 

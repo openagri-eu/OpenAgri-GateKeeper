@@ -1,5 +1,8 @@
-import requests
+# gatekeeper/api_utils.py
+
 import json
+import requests
+
 
 class APIUtils:
     BASE_URL = "http://127.0.0.1:8001"
