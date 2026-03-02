@@ -17,7 +17,7 @@ POST /api/login/
 ```
 
 **Description:**
-Obtain JWT tokens (access and refresh) for authentication.
+Obtain JWT tokens (access and refresh) for authentication. Accepts either username or email as the login identifier.
 
 **Headers:**
 ```
@@ -25,35 +25,34 @@ Content-Type: application/json
 ```
 
 **Request Body:**
-```
+```json
 {
-    "username": "string", // required
-    "password": "string" // required
+    "username": "string",  // required - can be username or email
+    "password": "string"   // required
 }
 ```
 
 **Success Response:**
-```
+```json
 {
     "success": true,
-    "access": "string", // JWT access token
-    "refresh": "string" // JWT refresh token
+    "access": "string",  // JWT access token
+    "refresh": "string"  // JWT refresh token
 }
 ```
 
 **Error Responses:**
 
 **400 Bad Request - Missing required fields**
-```
+```json
 {
     "username": ["This field is required."],
     "password": ["This field is required."]
 }
 ```
 
-
 **401 Unauthorized - Invalid credentials or inactive/deleted account**
-```
+```json
 {
     "detail": "No active account found with the given credentials"
 }
@@ -69,7 +68,55 @@ POST /api/logout/
 ```
 
 **Description:**  
-Logs out a user by blacklisting the refresh token.
+Logs out a user by blacklisting the refresh token. Optionally blacklists the access token if provided in the Authorization header.
+
+**Headers:**
+```
+Content-Type: application/json
+Authorization: Bearer <access_token> (Optional)
+```
+
+**Request Body:**
+```json
+{
+    "refresh": "string"  // required, JWT refresh token
+}
+```
+
+**Success Response:**
+```json
+{
+    "success": "Logged out successfully"
+}
+```
+
+**Error Responses:**
+
+**400 Bad Request - Missing token**
+```json
+{
+    "error": "Refresh token is required"
+}
+```
+
+**400 Bad Request - Invalid or expired token**
+```json
+{
+    "error": "Invalid or expired token"
+}
+```
+
+---
+
+### 3. Token Refresh
+
+**Endpoint:**
+```
+POST /api/token/refresh/
+```
+
+**Description:**
+Obtain a new access token by providing a valid refresh token.
 
 **Headers:**
 ```
@@ -77,30 +124,168 @@ Content-Type: application/json
 ```
 
 **Request Body:**
-```
-{ "refresh": "string" // required, JWT refresh token }
+```json
+{
+    "refresh": "string"  // required, JWT refresh token
+}
 ```
 
 **Success Response:**
+```json
+{
+    "access": "string"  // New JWT access token
+}
 ```
-{ "success": "Logged out successfully" }
+
+**Error Responses:**
+
+**400 Bad Request - Missing or incorrect refresh token**
+```json
+{
+    "refresh": ["This field is required."]
+}
+```
+
+**401 Unauthorized - Invalid or expired refresh token**
+```json
+{
+    "detail": "Token is invalid or expired",
+    "code": "token_not_valid"
+}
+```
+
+---
+
+### 4. Token Validation
+
+**Endpoint:**
+```
+POST /api/validate_token/
+```
+
+**Description:**
+Validate an access or refresh token to check if it is still valid and obtain the remaining time until expiration.
+
+**Headers:**
+```
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+    "token": "string",      // required, JWT token to validate
+    "token_type": "string"  // optional, "access" (default) or "refresh"
+}
+```
+
+**Success Response:**
+```json
+{
+    "success": true,
+    "remaining_time_in_seconds": 1234  // Time left before the token expires
+}
 ```
 
 **Error Responses:**
 
 **400 Bad Request - Missing token**
-```
-{ "error": "Refresh token is required" }
+```json
+{
+    "error": "Token is required"
+}
 ```
 
-**400 Bad Request - Invalid or expired token**
+**400 Bad Request - Invalid token or incorrect token type**
+```json
+{
+    "error": "Invalid access token"
+}
 ```
-{ "error": "Invalid or expired token" }
+
+**400 Bad Request - Expired token**
+```json
+{
+    "error": "Access token has expired"
+}
 ```
 
 ---
 
-### 3. Register a Service
+### 5. Get Current User (Me)
+
+**Endpoint:**
+```
+GET /api/me/
+```
+
+**Description:**
+Returns the authenticated user's profile and service permissions.
+
+**Headers:**
+```
+Authorization: Bearer <access_token> (Required)
+```
+
+**Success Response:**
+```json
+{
+    "user": {
+        "uuid": "string",
+        "username": "string",
+        "email": "string",
+        "first_name": "string",
+        "last_name": "string",
+        "groups": ["group1", "group2"]
+    },
+    "services": [
+        {
+            "code": "service_code",
+            "name": "Service Name",
+            "actions": ["view", "add", "edit", "delete"]
+        }
+    ]
+}
+```
+
+**Error Responses:**
+
+**401 Unauthorized - Missing or invalid token**
+```json
+{
+    "detail": "Authentication credentials were not provided."
+}
+```
+
+---
+
+### 6. Who Am I
+
+**Endpoint:**
+```
+GET /api/whoami/
+```
+
+**Description:**
+Simple endpoint to check authentication status and get the current username.
+
+**Headers:**
+```
+Authorization: Bearer <access_token> (Required)
+```
+
+**Success Response:**
+```json
+{
+    "user": "username"
+}
+```
+
+---
+
+## Service Registry Endpoints
+
+### 7. Register a Service
 
 **Endpoint:**
 ```
@@ -125,41 +310,35 @@ Authorization: Bearer <access_token> (Required)
 ```
 
 **Request Body:**
-```
+```json
 {
-    // Required, base URL of the service (name of the docker service)
-    "base_url": "string",
-    
-    // Required, name of the service
-    "service_name": "string",
-     
-    // Required, endpoint of the service
-    "endpoint": "string",
-    
-    // Optional, list of HTTP methods (default: ["GET", "POST"])
-    "methods": ["string"],
-    
-    // Optional, additional parameters for the service
-    "params": "string of query parameters"
-    
-    // Optional, comments for the service, if any
-    "comments": "string"
+    "base_url": "string",     // Required, base URL of the service (e.g., "http://service_name:8000/")
+    "service_name": "string", // Required, name of the service (alphanumeric and underscores only)
+    "endpoint": "string",     // Required, endpoint path (must NOT start with / and must NOT end with /)
+    "methods": ["string"],    // Optional, list of HTTP methods (default: ["GET", "POST"])
+    "params": "string",       // Optional, query parameter templates (e.g., "lat={}&lon={}")
+    "comments": "string"      // Optional, comments for the service
 }
 ```
+
+**Validation Rules:**
+- `base_url`: Must follow format `http://hostname:port/` or `https://hostname:port/`, max 100 chars
+- `service_name`: Alphanumeric and underscores only, cannot start/end with underscore, max 30 chars
+- `endpoint`: Must not start with `/` or `\`, max 100 chars
 
 **Success Response:**
 
 **201 Created - Service registered successfully**
-```
+```json
 {
     "success": true,
-    "message": "Service registered successfully", 
-    "service_id": 9 // ID of the created service at GateKeeper
+    "message": "Service registered successfully",
+    "service_id": 9
 }
 ```
 
-**200 OK - Existing service updated with new methods**
-```
+**200 OK - Existing service updated**
+```json
 {
     "success": true,
     "message": "Service updated successfully.",
@@ -170,320 +349,280 @@ Authorization: Bearer <access_token> (Required)
 **Error Responses:**
 
 **400 Bad Request - Missing required fields**
-```
+```json
 {
     "error": "Missing required fields: endpoint"
 }
 ```
 
-**400 Bad Request - Invalid JSON input**
-```
-{
-    "detail": "JSON parse error - Expecting ’,’ delimiter: line 3 column 3 (char 35)"
-}
-```
-
 **400 Bad Request - Methods not in the correct format**
-```
+```json
 {
     "error": "Methods should be a list of strings."
 }
 ```
 
-**400 Bad Request - Service already exists with the same methods**
-```
-{
-    "error": "A service with this endpoint and methods already exists."
-}
-```
-
 **400 Bad Request - Base URL format invalid**
-```
+```json
 {
-    "error": "Base URL must follow the format ’http://baseurl:port/’ or ’https://baseurl:port/’."
+    "error": "Base URL must follow the format 'http://baseurl:port/' or 'https://baseurl:port/'. The base URL name must only contain alphanumeric characters, dots (.), or underscores (_), and must start and end with an alphanumeric character. The port number must be 1-5 digits."
 }
 ```
 
 **400 Bad Request - Service Name invalid**
-```
+```json
 {
-    "error": "Service name must only contain alphanumeric characters and underscores, and must be less than 30 characters."
+    "error": "Service name must only contain alphanumeric characters and underscores. It cannot start or end with an underscore, and must be less than 30 characters long."
 }
 ```
 
 **400 Bad Request - Endpoint format invalid**
-```
+```json
 {
-    "error": "Endpoint must not start with a forward or backward slash and must end with ’/’."
+    "error": "Endpoint must not start with a forward or backward slash."
 }
 ```
 
-**500 Internal Server Error - Database or unexpected error**
-```
+**500 Internal Server Error**
+```json
 {
-    "error": "Database error: <database_error_message>"
-}
-{
-    "error": "Unexpected error: <error_message>"
+    "error": "A database error has occurred."
 }
 ```
 
 ---
 
-### 4. Delete a Service
+### 8. Service Directory
 
 **Endpoint:**
 ```
-POST /api/delete_service/
+GET /api/service_directory/
 ```
 
-**Description:**  
-Delete a service or specific method associated with a service. You can delete:
-- A specific method by providing the method query parameter.
-- The entire service if method is not provided.
+**Description:**
+Retrieve a list of all registered active services. Optionally filter by service name, endpoint, or method.
 
 **Headers:**
 ```
-Authorization: Bearer <access token> (Required)
+Content-Type: application/json
+Authorization: Bearer <access_token> (Required)
 ```
 
-**Request Body:**
+**Query Parameters (Optional):**
+| Parameter | Description |
+|-----------|-------------|
+| `service_name` | Partial or full match for the service name |
+| `endpoint` | Partial or full match for the endpoint |
+| `method` | HTTP method supported by the service |
+
+**Success Response:**
+```json
+[
+    {
+        "base_url": "http://127.0.0.1:8003",
+        "service_name": "weather_data",
+        "endpoint": "get_temperature/{dd-mm-yyyy}/",
+        "methods": ["POST", "DELETE", "GET"],
+        "params": "",
+        "comments": "",
+        "service_url": "http://127.0.0.1:8001/api/proxy/weather_data/get_temperature/{dd-mm-yyyy}/"
+    },
+    {
+        "base_url": "http://127.0.0.1:8002/",
+        "service_name": "farm_calendar",
+        "endpoint": "get_all_farms/{id}/",
+        "methods": ["DELETE", "POST", "GET"],
+        "params": "",
+        "comments": "",
+        "service_url": "http://127.0.0.1:8001/api/proxy/farm_calendar/get_all_farms/{id}/"
+    }
+]
 ```
+
+**Error Responses:**
+
+**500 Internal Server Error**
+```json
 {
-    base_url: string // Required, base URL of the service
-    service_name: string // Required, name of the service
-    endpoint: string // Required, endpoint of the service
-    method: string // Optional, HTTP method to delete (e.g., "POST")
+    "error": "A database error has occurred."
 }
 ```
 
-**Success Responses:**
-**200 OK - Entire service deleted**
+---
+
+### 9. Delete a Service
+
+**Endpoint:**
 ```
+DELETE /api/delete_service/
+```
+
+**Description:**  
+Delete a service or a specific method associated with a service. You can:
+- Delete the entire service by omitting the `method` parameter
+- Remove a specific method by providing the `method` query parameter
+
+**Headers:**
+```
+Authorization: Bearer <access_token> (Required)
+```
+
+**Query Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `base_url` | Yes | Base URL of the service |
+| `service_name` | Yes | Name of the service |
+| `endpoint` | Yes | Endpoint of the service |
+| `method` | No | HTTP method to delete (e.g., "POST") |
+
+**Success Responses:**
+
+**200 OK - Entire service deleted**
+```json
 {
     "success": true,
     "message": "Base URL, service and endpoint deleted successfully."
 }
 ```
 
-**200 OK - Specific method removed from the service**
-```
+**200 OK - Specific method removed**
+```json
 {
     "success": true,
-    "message": "Method ’POST’ removed from the service."
+    "message": "Method 'POST' removed from the service."
 }
 ```
 
 **Error Responses:**
+
 **400 Bad Request - Missing required parameters**
-```
+```json
 {
     "error": "Base URL, service name, and endpoint are required."
 }
 ```
 
-**400 Bad Request - Method not found for the service**
-```
+**400 Bad Request - Method not found**
+```json
 {
-    "error": "Method ’POST’ does not exist for this endpoint."
+    "error": "Method 'POST' does not exist for this endpoint."
 }
 ```
 
-**404 Not Found - Service not found or already deleted**
-```
+**404 Not Found - Service not found**
+```json
 {
     "error": "Service with this base URL, name, and endpoint does not exist or is already deleted."
 }
 ```
 
-**500 Internal Server Error - Database or unexpected error**
-```
+**500 Internal Server Error**
+```json
 {
-    "error": "Database error: <database_error_message>"
-}
-{
-    "error": "Unexpected error: <error_message>"
+    "error": "A database error has occurred."
 }
 ```
 
 ---
 
-### 5. Service Directory
+## Proxy Endpoint
+
+### 10. Reverse Proxy
+
 **Endpoint:**
 ```
-GET /api/service directory/
+GET|POST|PUT|PATCH|DELETE|OPTIONS /api/proxy/<service_name>/<endpoint_path>/
 ```
+
+**Description:**
+Routes authenticated requests to registered backend services. The GateKeeper validates the access token, checks service permissions, and forwards the request to the appropriate backend service.
 
 **Headers:**
 ```
-Content-Type: application/json
-Authorization: Bearer <access token> (Required)
+Authorization: Bearer <access_token> (Required)
+Content-Type: application/json  // As required by the backend service
 ```
-**Description:**
-Retrieve a list of all registered services. If no query parameters are provided, all available
-services are returned. Optionally, you can filter the results based on service name, endpoint, or
-method.
 
-**Optional Query Parameters:**
+**URL Pattern:**
 ```
-{
-    "service_name": "string", // Optional, partial or full match for the service name
-    "endpoint": "string", // Optional, partial or full match for the endpoint
-    "method": "string" // Optional, HTTP method supported by the service
-}
+/api/proxy/{service_name}/{endpoint}/
+```
+
+**Example:**
+```
+GET /api/proxy/weather_data/get_temperature/01-01-2024/
 ```
 
 **Success Response:**
-```
-[
-    {
-        "base_url": "http://127.0.0.1:8003",
-        "service_name": "weather_data",
-        "endpoint": "get_temperature/{dd-mm-yyyy}",
-        "methods":[
-            "POST",
-            "DELETE",
-            "GET"
-        ],
-        "params":{},
-        "service_url": "http://127.0.0.1:8003/weather_data/get_temperature/{dd-mm-yyyy}"
-    },
-    {
-        "base_url": "http://127.0.0.1:8002/",
-        "service_name": "farm_calendar",
-        "endpoint": "get_all_farms/{id}",
-        "methods":[
-            "DELETE",
-            "POST",
-            "GET"
-        ],
-        "params":{},
-        "service_url": "http://127.0.0.1:8002/farm_calendar/get_all_farms/{id}"
-    }
-]
-```
-
+Returns the response from the backend service (passthrough).
 
 **Error Responses:**
 
-**500 Internal Server Error - Unexpected error during query execution**
-```
+**400 Bad Request - Invalid path**
+```json
 {
-    "error": "Unexpected error: <error_message>"
+    "error": "Invalid path format."
 }
 ```
 
-**500 Internal Server Error - Database error**
-```
+**404 Not Found - Service not found**
+```json
 {
-    "error": "Database error: <database_error_message>"
+    "error": "No service can provide this resource."
+}
+```
+
+**405 Method Not Allowed**
+```json
+{
+    "error": "Method DELETE not allowed for this endpoint."
+}
+```
+
+**401 Unauthorized - Missing or invalid token**
+```json
+{
+    "detail": "Authentication credentials were not provided."
 }
 ```
 
 ---
 
-### 6. Token Refresh
+## Health Check Endpoint
+
+### 11. Health Check
 
 **Endpoint:**
 ```
-POST /api/token/refresh/
+GET /healthz
 ```
 
 **Description:**
-Obtain a new access token by providing a valid refresh token.
-
-**Headers:**
-```
-Content-Type: application/json
-```
-
-**Request Body:**
-```
-{
-    "refresh": "string" // required, JWT refresh token
-}
-```
+Health check endpoint for monitoring and container orchestration. Checks database connectivity.
 
 **Success Response:**
-```
+```json
 {
-    "access": "string" // New JWT access token
+    "status": "ready"
 }
 ```
 
-**Error Responses:**
-
-**400 Bad Request - Missing or incorrect refresh token**
-```
+**Error Response:**
+```json
 {
-    "refresh": ["This field is required."]
-}
-```
-
-
-**401 Unauthorized - Invalid or expired refresh token**
-```
-{
-    "detail": "Token is invalid or expired",
-    "code": "token_not_valid"
-}
-```
-
----
-
-### 7. Token Validation
-
-**Endpoint:**
-```
-POST /api/validate token/
-```
-
-**Description:**
-Validate an access or refresh token to check if it is still valid and obtain the remaining time until expiration.
-
-**Headers:**
-```
-Content-Type: application/json
-```
-
-**Request Body:**
-```
-{
-    "token": "string",      // required, JWT token to validate
-    "token_type": "string"  // optional, "access" (default) or "refresh"
-}
-```
-
-**Success Response:**
-```
-{
-    "success": true,
-    "remaining_time_in_seconds": number     // Time left before the token expires
-}
-```
-
-**Error Responses:**
-
-**400 Bad Request - Missing token**
-```
-{
-    "error": "Token is required"
-}
-```
-
-
-**400 Bad Request - Invalid token or incorrect token type**
-```
-{
-    "error": "Invalid access token"
+    "status": "error",
+    "message": "Error description"
 }
 ```
 
 ---
 
 ## Notes
+
 - Ensure that authentication tokens are handled securely.
 - The access token should be used in API requests requiring authentication.
 - Refresh tokens should be stored securely and never exposed in frontend applications.
+- Token expiration is configurable via environment variables.
+- The `rjti` claim in access tokens links them to their parent refresh token for revocation purposes.
 
 ---
