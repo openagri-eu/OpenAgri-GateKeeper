@@ -1,3 +1,5 @@
+# aegis/models.py
+
 import uuid
 
 from django.conf import settings
@@ -5,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, AbstractUser
 from django.core.validators import RegexValidator
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 from simple_history.models import HistoricalRecords
@@ -39,6 +42,27 @@ class BaseModel(models.Model):
         self.save()
 
 
+class Tenant(BaseModel):
+    """
+    Shared-deployment tenant boundary.
+    One SIP organisation maps to one tenant.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField(max_length=32, unique=True, db_index=True)
+    slug = models.SlugField(max_length=64, unique=True)
+    name = models.CharField(max_length=255, unique=True)
+
+    class Meta:
+        db_table = 'tenant'
+        verbose_name = 'Tenant'
+        verbose_name_plural = 'Tenants'
+        ordering = ('code',)
+
+    def __str__(self):
+        return f"{self.code} - {self.name}"
+
+
 class RequestLog(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True)
     ip_address = models.CharField(max_length=45)
@@ -70,6 +94,14 @@ class DefaultAuthUserExtend(AbstractUser, BaseModel):
     contact_no = models.CharField(max_length=10, null=True, db_index=True, default='', blank=True,
                                   validators=[RegexValidator(regex=r'^[0-9- ]+$', message="Invalid phone number")])
     token_version = models.IntegerField(default=1)
+    tenant = models.ForeignKey(
+        'Tenant',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='users',
+    )
+    is_tenant_admin = models.BooleanField(default=False)
 
     history = HistoricalRecords(table_name="auth_user_extend_history")
 
@@ -80,6 +112,33 @@ class DefaultAuthUserExtend(AbstractUser, BaseModel):
 
     def __str__(self):
         return f"{self.email} {self.first_name}"
+
+    def _released_username(self):
+        return f"deleted__{self.uuid.hex[:12]}__{self.username}"[:150]
+
+    def _released_email(self):
+        local, _, domain = (self.email or "").partition("@")
+        domain = domain or "deleted.local"
+        suffix = f"deleted+{self.uuid.hex[:12]}__"
+        local_budget = max(1, 254 - len(domain) - 1 - len(suffix))
+        local = (local or "user")[:local_budget]
+        return f"{suffix}{local}@{domain}"
+
+    def soft_delete(self):
+        if (
+            self.status == 2
+            and str(self.username).startswith("deleted__")
+            and str(self.email).startswith("deleted+")
+        ):
+            return
+        self.username = self._released_username()
+        self.email = self._released_email()
+        self.is_active = False
+        self.is_staff = False
+        self.is_tenant_admin = False
+        self.status = 2
+        self.deleted_at = timezone.now()
+        self.save()
 
 
 class RegisteredService(BaseModel):
@@ -104,31 +163,31 @@ class RegisteredService(BaseModel):
         return self.service_name
 
 
-class AdminMenuMaster(BaseModel):
-    id = models.SmallAutoField(primary_key=True, db_column='id', db_index=True, editable=False, unique=True,
-                               blank=False, null=False, verbose_name='ID')
-    parent_id = models.ForeignKey('self', null=True, blank=True, related_name='submenus', db_column='parent_id',
-                                  on_delete=models.CASCADE)
-    menu_name = models.CharField(max_length=30, null=False, blank=False, unique=True,
-                                 validators=[RegexValidator(regex=r'^[a-zA-Z0-9()\s]+$', message="Invalid characters")])
-    menu_icon = models.CharField(max_length=20, null=True, blank=True, default='list',
-                                 validators=[RegexValidator(regex=r'^[a-z0-9-]+$', message="Invalid characters")])
-    menu_route = models.CharField(max_length=30, null=True, blank=True,
-                                  validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
-    menu_access = models.CharField(max_length=30, null=True, blank=True,
-                                   validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
-    menu_order = models.SmallIntegerField(null=True, blank=True,
-                                          validators=[RegexValidator(regex=r'^[0-9]+$', message="Invalid characters")])
-
-    history = HistoricalRecords(table_name="admin_menu_master_history")
-
-    class Meta:
-        db_table = "admin_menu_master"
-        verbose_name = "Admin Menu"
-        verbose_name_plural = "Admin Menus"
-
-    def __str__(self):
-        return f"{self.menu_name} ({self.menu_route})"
+# class AdminMenuMaster(BaseModel):
+#     id = models.SmallAutoField(primary_key=True, db_column='id', db_index=True, editable=False, unique=True,
+#                                blank=False, null=False, verbose_name='ID')
+#     parent_id = models.ForeignKey('self', null=True, blank=True, related_name='submenus', db_column='parent_id',
+#                                   on_delete=models.CASCADE)
+#     menu_name = models.CharField(max_length=30, null=False, blank=False, unique=True,
+#                                  validators=[RegexValidator(regex=r'^[a-zA-Z0-9()\s]+$', message="Invalid characters")])
+#     menu_icon = models.CharField(max_length=20, null=True, blank=True, default='list',
+#                                  validators=[RegexValidator(regex=r'^[a-z0-9-]+$', message="Invalid characters")])
+#     menu_route = models.CharField(max_length=30, null=True, blank=True,
+#                                   validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
+#     menu_access = models.CharField(max_length=30, null=True, blank=True,
+#                                    validators=[RegexValidator(regex=r'^[a-zA-Z0-9\s-]+$', message="Invalid characters")])
+#     menu_order = models.SmallIntegerField(null=True, blank=True,
+#                                           validators=[RegexValidator(regex=r'^[0-9]+$', message="Invalid characters")])
+#
+#     history = HistoricalRecords(table_name="admin_menu_master_history")
+#
+#     class Meta:
+#         db_table = "admin_menu_master"
+#         verbose_name = "Admin Menu"
+#         verbose_name_plural = "Admin Menus"
+#
+#     def __str__(self):
+#         return f"{self.menu_name} ({self.menu_route})"
 
 
 class PermissionMaster(BaseModel):
@@ -149,7 +208,7 @@ class PermissionMaster(BaseModel):
         db_table = "permission_master"
         verbose_name = "Permission"
         verbose_name_plural = "Permissions"
-        # unique_together = ('service', 'action')
+        unique_together = ('service', 'action')
 
     def __str__(self):
         return f"{self.service.service_code}_{self.action}"
@@ -274,6 +333,7 @@ class GroupServiceAccess(BaseModel):
     One row means: this Group can access this Service.
     Keep it minimal (no per-action scopes for now).
     """
+    tenant = models.ForeignKey('Tenant', on_delete=models.SET_NULL, null=True, blank=True, related_name='group_service_links')
     group = models.ForeignKey(Group, on_delete=models.CASCADE, related_name="service_links")
     service = models.ForeignKey(ServiceMaster, on_delete=models.CASCADE, related_name="group_links")
 
@@ -286,3 +346,134 @@ class GroupServiceAccess(BaseModel):
     def __str__(self):
         return f"{self.group.name} → {self.service.service_code}"
 
+
+class ServiceRole(BaseModel):
+    """
+    DB-backed role definition for a service.
+    A role maps to a set of service permissions/actions.
+    """
+    tenant = models.ForeignKey(
+        'Tenant', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='service_roles'
+    )
+    service = models.ForeignKey(ServiceMaster, on_delete=models.CASCADE, related_name="roles")
+    role_code = models.CharField(max_length=50)
+    role_name = models.CharField(max_length=100)
+    description = models.TextField(blank=True, null=True)
+    permissions = models.ManyToManyField(PermissionMaster, blank=True, related_name="service_roles")
+
+    class Meta:
+        db_table = "service_role"
+        verbose_name = "Service Role"
+        verbose_name_plural = "Service Roles"
+        unique_together = (("tenant", "service", "role_code"), ("tenant", "service", "role_name"))
+        ordering = ("tenant__code", "service__service_code", "role_name")
+
+    def __str__(self):
+        tenant_code = self.tenant.code if self.tenant_id else "global"
+        return f"{self.role_name} ({tenant_code}/{self.service.service_code})"
+
+
+class ServiceScopeAssignment(BaseModel):
+    """
+    Scoped service permissions for either a user or a group.
+    Scope IDs are external resource IDs (e.g. FC farm/parcel UUIDs).
+    """
+    SCOPE_TYPE_CHOICES = (
+        ("farm", "farm"),
+        ("parcel", "parcel"),
+    )
+
+    id = models.AutoField(
+        primary_key=True, db_column='id', db_index=True, editable=False, unique=True,
+        blank=False, null=False, verbose_name='ID'
+    )
+    tenant = models.ForeignKey(
+        'Tenant', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='service_scope_assignments'
+    )
+    service = models.ForeignKey(
+        ServiceMaster, on_delete=models.CASCADE, related_name="scope_assignments"
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="service_scope_assignments"
+    )
+    group = models.ForeignKey(
+        Group, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="service_scope_assignments"
+    )
+    role_ref = models.ForeignKey(
+        "ServiceRole", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="scope_assignments"
+    )
+    role = models.CharField(max_length=50, default="viewer")
+    actions = models.JSONField(default=list, blank=True)
+    scope_type = models.CharField(max_length=20, choices=SCOPE_TYPE_CHOICES)
+    scope_id = models.UUIDField(db_index=True)
+
+    class Meta:
+        db_table = "service_scope_assignments"
+        verbose_name = "Role Grant"
+        verbose_name_plural = "Role Grants"
+        indexes = [
+            models.Index(fields=["tenant", "status"], name="ssa_tenant_status_idx"),
+            models.Index(fields=["scope_type", "scope_id"], name="ssa_scope_idx"),
+            models.Index(fields=["service", "status"], name="ssa_service_status_idx"),
+            models.Index(fields=["user", "status"], name="ssa_user_status_idx"),
+            models.Index(fields=["group", "status"], name="ssa_group_status_idx"),
+        ]
+        constraints = [
+            # Exactly one subject must be provided: user XOR group.
+            models.CheckConstraint(
+                condition=(
+                    (Q(user__isnull=False) & Q(group__isnull=True))
+                    | (Q(user__isnull=True) & Q(group__isnull=False))
+                ),
+                name="ssa_exactly_one_subject",
+            ),
+        ]
+
+    def __str__(self):
+        subject = self.user.username if self.user_id else (self.group.name if self.group_id else "unknown")
+        return f"{self.service.service_code}:{self.role}:{self.scope_type}:{self.scope_id} -> {subject}"
+
+
+class FarmCalendarResourceCache(BaseModel):
+    """
+    Local cache of FarmCalendar resources used by GK assignment UIs.
+    """
+    RESOURCE_TYPE_CHOICES = (
+        ("farm", "farm"),
+        ("parcel", "parcel"),
+    )
+
+    id = models.AutoField(
+        primary_key=True, db_column='id', db_index=True, editable=False, unique=True,
+        blank=False, null=False, verbose_name='ID'
+    )
+    resource_type = models.CharField(max_length=20, choices=RESOURCE_TYPE_CHOICES, db_index=True)
+    resource_id = models.UUIDField(db_index=True)
+    tenant = models.ForeignKey(
+        'Tenant', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='fc_resources'
+    )
+    name = models.CharField(max_length=255, blank=True, null=True)
+    farm_id = models.UUIDField(blank=True, null=True, db_index=True)
+    payload = models.JSONField(default=dict, blank=True)
+    synced_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        db_table = "farmcalendar_resource_cache"
+        verbose_name = "FarmCalendar Resource Cache"
+        verbose_name_plural = "FarmCalendar Resource Cache"
+        unique_together = (("resource_type", "resource_id"),)
+        indexes = [
+            models.Index(fields=["tenant", "status"], name="fcrc_tenant_status_idx"),
+            models.Index(fields=["resource_type", "status"], name="fcrc_type_status_idx"),
+            models.Index(fields=["farm_id", "status"], name="fcrc_farm_status_idx"),
+            models.Index(fields=["synced_at"], name="fcrc_synced_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.resource_type}:{self.resource_id}"

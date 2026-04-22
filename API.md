@@ -1,9 +1,18 @@
 # API Documentation
 
-This document provides the authentication endpoints for logging in and logging out of the GateKeeper API.
+This document describes the currently implemented GateKeeper API endpoints that matter for login, entitlement discovery, FarmCalendar scope discovery, catalog lookup, logout, and token lifecycle.
 
-## Base URL
+## Base URLs
+
+Local default:
+
+```text
+http://localhost:8001/
 ```
+
+API root:
+
+```text
 http://localhost:8001/api/
 ```
 
@@ -11,479 +20,388 @@ http://localhost:8001/api/
 
 ### 1. Login
 
-**Endpoint:**
-```
+**Endpoint**
+
+```text
 POST /api/login/
 ```
 
-**Description:**
-Obtain JWT tokens (access and refresh) for authentication.
+**Description**
 
-**Headers:**
-```
+Obtain JWT access and refresh tokens.
+
+Login accepts either:
+
+- username
+- email
+
+**Headers**
+
+```text
 Content-Type: application/json
 ```
 
-**Request Body:**
-```
+**Request Body**
+
+```json
 {
-    "username": "string", // required
-    "password": "string" // required
+  "username": "string",
+  "password": "string"
 }
 ```
 
-**Success Response:**
-```
+**Success Response**
+
+```json
 {
-    "success": true,
-    "access": "string", // JWT access token
-    "refresh": "string" // JWT refresh token
+  "success": true,
+  "access": "jwt-access-token",
+  "refresh": "jwt-refresh-token"
 }
 ```
 
-**Error Responses:**
+**Error Response**
 
-**400 Bad Request - Missing required fields**
-```
+```json
 {
-    "username": ["This field is required."],
-    "password": ["This field is required."]
+  "detail": "No active account found with the given credentials."
 }
 ```
-
-
-**401 Unauthorized - Invalid credentials or inactive/deleted account**
-```
-{
-    "detail": "No active account found with the given credentials"
-}
-```
-
----
 
 ### 2. Logout
 
-**Endpoint:**
-```
+**Endpoint**
+
+```text
 POST /api/logout/
 ```
 
-**Description:**  
-Logs out a user by blacklisting the refresh token.
+**Description**
 
-**Headers:**
-```
+Blacklists the submitted refresh token. If an access token is supplied in the `Authorization` header, GK also records that access token JTI in the access blacklist.
+
+**Headers**
+
+```text
 Content-Type: application/json
+Authorization: Bearer <access_token>   # optional
 ```
 
-**Request Body:**
-```
-{ "refresh": "string" // required, JWT refresh token }
-```
+**Request Body**
 
-**Success Response:**
-```
-{ "success": "Logged out successfully" }
-```
-
-**Error Responses:**
-
-**400 Bad Request - Missing token**
-```
-{ "error": "Refresh token is required" }
-```
-
-**400 Bad Request - Invalid or expired token**
-```
-{ "error": "Invalid or expired token" }
-```
-
----
-
-### 3. Register a Service
-
-**Endpoint:**
-```
-POST /api/register_service/
-```
-
-**Description:**  
-Register a new service endpoint or update an existing service with the provided data.
-If a service with the same base url, service name, and endpoint exists:
-- The service is updated with new methods, params, and comments.
-- Existing methods are merged with the new ones provided.
-- Existing params and comments are replaced with the new values.
-
-If no matching service is found, a new service is created.
-
-To remove method(s), use the Delete Service API.
-
-**Headers:**
-```
-Content-Type: application/json
-Authorization: Bearer <access_token> (Required)
-```
-
-**Request Body:**
-```
+```json
 {
-    // Required, base URL of the service (name of the docker service)
-    "base_url": "string",
-    
-    // Required, name of the service
-    "service_name": "string",
-     
-    // Required, endpoint of the service
-    "endpoint": "string",
-    
-    // Optional, list of HTTP methods (default: ["GET", "POST"])
-    "methods": ["string"],
-    
-    // Optional, additional parameters for the service
-    "params": "string of query parameters"
-    
-    // Optional, comments for the service, if any
-    "comments": "string"
+  "refresh": "jwt-refresh-token"
 }
 ```
 
-**Success Response:**
+**Success Response**
 
-**201 Created - Service registered successfully**
-```
+```json
 {
-    "success": true,
-    "message": "Service registered successfully", 
-    "service_id": 9 // ID of the created service at GateKeeper
+  "success": "Logged out successfully"
 }
 ```
 
-**200 OK - Existing service updated with new methods**
-```
+**Error Response**
+
+```json
 {
-    "success": true,
-    "message": "Service updated successfully.",
-    "service_id": 9
+  "error": "Refresh token is required"
 }
 ```
 
-**Error Responses:**
+### 3. Token Refresh
 
-**400 Bad Request - Missing required fields**
-```
-{
-    "error": "Missing required fields: endpoint"
-}
-```
+**Endpoint**
 
-**400 Bad Request - Invalid JSON input**
-```
-{
-    "detail": "JSON parse error - Expecting ’,’ delimiter: line 3 column 3 (char 35)"
-}
-```
-
-**400 Bad Request - Methods not in the correct format**
-```
-{
-    "error": "Methods should be a list of strings."
-}
-```
-
-**400 Bad Request - Service already exists with the same methods**
-```
-{
-    "error": "A service with this endpoint and methods already exists."
-}
-```
-
-**400 Bad Request - Base URL format invalid**
-```
-{
-    "error": "Base URL must follow the format ’http://baseurl:port/’ or ’https://baseurl:port/’."
-}
-```
-
-**400 Bad Request - Service Name invalid**
-```
-{
-    "error": "Service name must only contain alphanumeric characters and underscores, and must be less than 30 characters."
-}
-```
-
-**400 Bad Request - Endpoint format invalid**
-```
-{
-    "error": "Endpoint must not start with a forward or backward slash and must end with ’/’."
-}
-```
-
-**500 Internal Server Error - Database or unexpected error**
-```
-{
-    "error": "Database error: <database_error_message>"
-}
-{
-    "error": "Unexpected error: <error_message>"
-}
-```
-
----
-
-### 4. Delete a Service
-
-**Endpoint:**
-```
-POST /api/delete_service/
-```
-
-**Description:**  
-Delete a service or specific method associated with a service. You can delete:
-- A specific method by providing the method query parameter.
-- The entire service if method is not provided.
-
-**Headers:**
-```
-Authorization: Bearer <access token> (Required)
-```
-
-**Request Body:**
-```
-{
-    base_url: string // Required, base URL of the service
-    service_name: string // Required, name of the service
-    endpoint: string // Required, endpoint of the service
-    method: string // Optional, HTTP method to delete (e.g., "POST")
-}
-```
-
-**Success Responses:**
-**200 OK - Entire service deleted**
-```
-{
-    "success": true,
-    "message": "Base URL, service and endpoint deleted successfully."
-}
-```
-
-**200 OK - Specific method removed from the service**
-```
-{
-    "success": true,
-    "message": "Method ’POST’ removed from the service."
-}
-```
-
-**Error Responses:**
-**400 Bad Request - Missing required parameters**
-```
-{
-    "error": "Base URL, service name, and endpoint are required."
-}
-```
-
-**400 Bad Request - Method not found for the service**
-```
-{
-    "error": "Method ’POST’ does not exist for this endpoint."
-}
-```
-
-**404 Not Found - Service not found or already deleted**
-```
-{
-    "error": "Service with this base URL, name, and endpoint does not exist or is already deleted."
-}
-```
-
-**500 Internal Server Error - Database or unexpected error**
-```
-{
-    "error": "Database error: <database_error_message>"
-}
-{
-    "error": "Unexpected error: <error_message>"
-}
-```
-
----
-
-### 5. Service Directory
-**Endpoint:**
-```
-GET /api/service directory/
-```
-
-**Headers:**
-```
-Content-Type: application/json
-Authorization: Bearer <access token> (Required)
-```
-**Description:**
-Retrieve a list of all registered services. If no query parameters are provided, all available
-services are returned. Optionally, you can filter the results based on service name, endpoint, or
-method.
-
-**Optional Query Parameters:**
-```
-{
-    "service_name": "string", // Optional, partial or full match for the service name
-    "endpoint": "string", // Optional, partial or full match for the endpoint
-    "method": "string" // Optional, HTTP method supported by the service
-}
-```
-
-**Success Response:**
-```
-[
-    {
-        "base_url": "http://127.0.0.1:8003",
-        "service_name": "weather_data",
-        "endpoint": "get_temperature/{dd-mm-yyyy}",
-        "methods":[
-            "POST",
-            "DELETE",
-            "GET"
-        ],
-        "params":{},
-        "service_url": "http://127.0.0.1:8003/weather_data/get_temperature/{dd-mm-yyyy}"
-    },
-    {
-        "base_url": "http://127.0.0.1:8002/",
-        "service_name": "farm_calendar",
-        "endpoint": "get_all_farms/{id}",
-        "methods":[
-            "DELETE",
-            "POST",
-            "GET"
-        ],
-        "params":{},
-        "service_url": "http://127.0.0.1:8002/farm_calendar/get_all_farms/{id}"
-    }
-]
-```
-
-
-**Error Responses:**
-
-**500 Internal Server Error - Unexpected error during query execution**
-```
-{
-    "error": "Unexpected error: <error_message>"
-}
-```
-
-**500 Internal Server Error - Database error**
-```
-{
-    "error": "Database error: <database_error_message>"
-}
-```
-
----
-
-### 6. Token Refresh
-
-**Endpoint:**
-```
+```text
 POST /api/token/refresh/
 ```
 
-**Description:**
-Obtain a new access token by providing a valid refresh token.
+**Request Body**
 
-**Headers:**
-```
-Content-Type: application/json
-```
-
-**Request Body:**
-```
+```json
 {
-    "refresh": "string" // required, JWT refresh token
+  "refresh": "jwt-refresh-token"
 }
 ```
 
-**Success Response:**
-```
+**Success Response**
+
+```json
 {
-    "access": "string" // New JWT access token
+  "access": "new-jwt-access-token"
 }
 ```
 
-**Error Responses:**
+### 4. Token Validation
 
-**400 Bad Request - Missing or incorrect refresh token**
+**Endpoint**
+
+```text
+POST /api/validate_token/
 ```
+
+**Request Body**
+
+```json
 {
-    "refresh": ["This field is required."]
+  "token": "jwt-token",
+  "token_type": "access"
 }
 ```
 
+`token_type` may be:
 
-**401 Unauthorized - Invalid or expired refresh token**
-```
+- `access`
+- `refresh`
+
+**Success Response**
+
+```json
 {
-    "detail": "Token is invalid or expired",
-    "code": "token_not_valid"
+  "success": true,
+  "remaining_time_in_seconds": 1234.56
 }
 ```
 
----
+**Error Response**
 
-### 7. Token Validation
-
-**Endpoint:**
-```
-POST /api/validate token/
-```
-
-**Description:**
-Validate an access or refresh token to check if it is still valid and obtain the remaining time until expiration.
-
-**Headers:**
-```
-Content-Type: application/json
-```
-
-**Request Body:**
-```
+```json
 {
-    "token": "string",      // required, JWT token to validate
-    "token_type": "string"  // optional, "access" (default) or "refresh"
+  "error": "Invalid access token"
 }
 ```
 
-**Success Response:**
+## Identity And Entitlements
+
+### 5. Current User
+
+**Endpoint**
+
+```text
+GET /api/me/
 ```
+
+**Description**
+
+Returns:
+
+- the authenticated user's identity
+- tenant context
+- platform-admin / tenant-admin flags
+- normalized service entitlements
+
+**Headers**
+
+```text
+Authorization: Bearer <access_token>
+```
+
+**Success Response**
+
+```json
 {
-    "success": true,
-    "remaining_time_in_seconds": number     // Time left before the token expires
+  "user": {
+    "uuid": "string",
+    "username": "string",
+    "email": "string",
+    "first_name": "string",
+    "last_name": "string",
+    "groups": [],
+    "tenant_id": "uuid-or-null",
+    "tenant_code": "sip06",
+    "tenant_name": "Precise Olive Irrigation Solution",
+    "is_platform_admin": false,
+    "is_tenant_admin": true
+  },
+  "services": [
+    {
+      "code": "FC",
+      "name": "Farm Calendar",
+      "roles": ["Viewer"],
+      "actions": ["view"],
+      "scopes": {
+        "farm": ["farm-uuid"],
+        "parcel": ["parcel-uuid"]
+      },
+      "assignments": [
+        {
+          "role": "Viewer",
+          "actions": ["view"],
+          "scope_type": "farm",
+          "scope_id": "farm-uuid",
+          "source": "user"
+        }
+      ],
+      "unrestricted": false
+    }
+  ]
 }
 ```
 
-**Error Responses:**
+Notes:
 
-**400 Bad Request - Missing token**
+- platform admins are returned with unrestricted service access
+- tenant admins receive implicit FC entitlement for their tenant
+- `assignments` reflects the exact entitlement rows used to derive the flattened `roles`, `actions`, and `scopes`
+
+### 6. FarmCalendar Scopes
+
+**Endpoint**
+
+```text
+GET /api/farmcalendar-scopes/
 ```
+
+**Description**
+
+Returns a UI-oriented FC scope block for the authenticated user.
+
+**Headers**
+
+```text
+Authorization: Bearer <access_token>
+```
+
+**Success Response**
+
+```json
 {
-    "error": "Token is required"
+  "service": {
+    "code": "FC",
+    "name": "Farm Calendar"
+  },
+  "tenant": {
+    "id": "uuid-or-null",
+    "code": "sip06",
+    "name": "Precise Olive Irrigation Solution"
+  },
+  "roles": ["Viewer"],
+  "actions": ["view"],
+  "assignments": [],
+  "unrestricted": false,
+  "scopes": {
+    "farm": ["farm-uuid"],
+    "parcel": ["parcel-uuid"]
+  },
+  "summary": {
+    "farm_count": 1,
+    "parcel_count": 1
+  }
 }
 ```
 
+If the user has no FC entitlement, GK returns an empty FC-shaped response instead of omitting the object entirely.
 
-**400 Bad Request - Invalid token or incorrect token type**
+### 7. FarmCalendar Catalog Mirror
+
+**Endpoint**
+
+```text
+GET /api/farmcalendar-catalog/
 ```
+
+**Description**
+
+Returns GK's cached FarmCalendar farm and parcel mirror. For non-platform users the response is tenant-filtered.
+
+**Headers**
+
+```text
+Authorization: Bearer <access_token>
+```
+
+**Success Response**
+
+```json
 {
-    "error": "Invalid access token"
+  "summary": {
+    "farm_count": 1,
+    "parcel_count": 2
+  },
+  "farms": [
+    {
+      "id": "farm-uuid",
+      "name": "Farm A",
+      "payload": {},
+      "synced_at": "2026-04-22T05:12:21+00:00"
+    }
+  ],
+  "parcels": [
+    {
+      "id": "parcel-uuid",
+      "name": "Parcel 1",
+      "farm_id": "farm-uuid",
+      "payload": {},
+      "synced_at": "2026-04-22T05:12:21+00:00"
+    }
+  ]
 }
 ```
 
----
+## Service Registry And Proxy
 
-## Notes
-- Ensure that authentication tokens are handled securely.
-- The access token should be used in API requests requiring authentication.
-- Refresh tokens should be stored securely and never exposed in frontend applications.
+### 8. Register Service
 
----
+**Endpoint**
+
+```text
+POST /api/register_service/
+```
+
+Registers a downstream service definition in GK.
+
+### 9. Service Directory
+
+**Endpoint**
+
+```text
+GET /api/service_directory/
+```
+
+Returns the registered service directory.
+
+### 10. Delete Service
+
+**Endpoint**
+
+```text
+POST /api/delete_service/
+```
+
+Deletes a registered service definition.
+
+### 11. Reverse Proxy
+
+**Endpoint**
+
+```text
+/api/proxy/<path>
+```
+
+GK proxies authenticated requests to downstream services and applies entitlement checks before forwarding.
+
+In practice this is used heavily for FarmCalendar:
+
+- `GET /api/proxy/farmcalendar/api/v1/Farm/`
+- `GET /api/proxy/farmcalendar/api/v1/Farm/<uuid>/`
+- `GET /api/proxy/farmcalendar/api/v1/FarmParcels/`
+- `PATCH /api/proxy/farmcalendar/api/v1/Farm/<uuid>/?format=json`
+
+The proxy layer is where tenant, action, and scope enforcement is applied for protected service requests.
+
+## Admin Login Behavior
+
+These are browser endpoints, not JSON API endpoints, but they matter operationally:
+
+- site login:
+  - `/login/`
+- admin login:
+  - `/admin/login/?next=/admin/`
+
+Django admin login accepts either:
+
+- username
+- email

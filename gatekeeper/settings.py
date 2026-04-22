@@ -1,3 +1,5 @@
+# gatekeeper/settings.py
+
 import dj_database_url
 import os
 import re
@@ -14,11 +16,6 @@ load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Define the log directory
-LOG_DIR = os.path.join(BASE_DIR, 'logs')
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = get_env_var('DJANGO_SECRET_KEY')
@@ -159,8 +156,7 @@ DEFAULT_APPS = [
 ]
 
 LOCAL_APPS = [
-    # "aegis"
-    "aegis.apps.AegisConfig",       # The app that contains auth logic, configured using the app's AppConfig.
+    "aegis.apps.AegisConfig",
 ]
 
 THIRD_PARTY_APPS = [
@@ -169,7 +165,6 @@ THIRD_PARTY_APPS = [
     'django.contrib.sites',
     'rest_framework',
     'drf_yasg',
-    # 'oauth2_provider',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders'
 ]
@@ -177,7 +172,7 @@ THIRD_PARTY_APPS = [
 INSTALLED_APPS = DEFAULT_APPS + LOCAL_APPS + THIRD_PARTY_APPS
 
 AUTHENTICATION_BACKENDS = (
-    'django.contrib.auth.backends.ModelBackend',
+    'aegis.auth_backends.EmailOrUsernameModelBackend',
 )
 
 
@@ -187,7 +182,7 @@ CRISPY_ALLOWED_TEMPLATE_PACKS = "bootstrap4"
 CRISPY_TEMPLATE_PACK = "bootstrap4"
 
 LOGIN_URL = "login/"
-LOGIN_REDIRECT_URL = 'aegis/dashboard/'  # Redirect to the login page
+LOGIN_REDIRECT_URL = '/'  # Redirect to the home page after login
 LOGOUT_REDIRECT_URL = 'login'  # Redirect to the login page after logging out
 
 
@@ -202,7 +197,6 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'gatekeeper.custom_middleware.ForceAppendSlashMiddleware.ForceAppendSlashMiddleware',
-    # 'gatekeeper.custom_middleware.RequestLoggingMiddleware.RequestLoggingMiddleware',
 ]
 
 ROOT_URLCONF = 'gatekeeper.urls'
@@ -289,11 +283,10 @@ STATIC_URL = "/assets/"
 
 # This setting defines the list of directories where Django will look for additional static files, in addition to
 # each app's static folder.
-# STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
-STATICFILES_DIRS = [os.path.join(BASE_DIR, "static")] if DEBUG else []
+STATICFILES_DIRS = [os.path.join(BASE_DIR, "static")]
 
 # STATIC_ROOT is the directory where these static files will be collected when you run collectstatic.
-STATIC_ROOT = os.path.join(BASE_DIR, 'assets')
+STATIC_ROOT = os.getenv("DJANGO_STATIC_ROOT", os.path.join(BASE_DIR, "assets"))
 
 AUTH_EXEMPT_PATHS = ["/assets/"]
 
@@ -379,12 +372,6 @@ LOGGING = {
         },
     },
     'handlers': {
-        'file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(LOG_DIR, 'django_tests.log'),
-            'formatter': 'verbose',
-        },
         'console': {
             'level': 'DEBUG',
             'class': 'logging.StreamHandler',
@@ -393,19 +380,24 @@ LOGGING = {
     },
     'loggers': {
         'django': {
-            'handlers': ['file', 'console'],
+            'handlers': ['console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
+        },
+        'django.server': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
         },
         'django.db.backends': {
-            'handlers': ['file', 'console'],
+            'handlers': ['console'],
             'level': 'WARNING',
             'propagate': False,
         },
         'aegis': {
-            'handlers': ['file', 'console'],
+            'handlers': ['console'],
             'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
         },
     },
 }

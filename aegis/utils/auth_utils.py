@@ -9,7 +9,7 @@ from django.contrib.auth.hashers import make_password, check_password
 
 def decode_jwt_token(token: str):
     try:
-        return jwt.decode(token, settings.JWT_SIGNING_KEY, algorithms=["HS256"])
+        return jwt.decode(token, settings.JWT_SIGNING_KEY, algorithms=[settings.JWT_ALG])
     except jwt.ExpiredSignatureError:
         raise ValidationError("Token expired")
     except jwt.InvalidTokenError:

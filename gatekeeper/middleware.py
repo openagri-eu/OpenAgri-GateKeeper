@@ -1,4 +1,4 @@
-# middleware.py
+# gatekeeper/middleware.py
 
 from django.http import JsonResponse
 from django.shortcuts import redirect

@@ -1,5 +1,8 @@
+# aegis/management/commands/initial_setup.py
+
 import os
 
+from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.db import connections, connection
@@ -68,7 +71,7 @@ class Command(BaseCommand):
             call_command('migrate')
 
         # Collect static files only if not already collected
-        static_dir = os.path.join(os.getcwd(), 'staticfiles')
+        static_dir = settings.STATIC_ROOT
         if not os.path.exists(static_dir) or not os.listdir(static_dir):
             self.stdout.write(self.style.SUCCESS('Collecting static files...'))
             call_command('collectstatic', '--noinput')

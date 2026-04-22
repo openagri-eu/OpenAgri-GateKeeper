@@ -1,6 +1,7 @@
 # aegis/views/api/service_registry_views.py
 
 import logging
+import json
 import re
 import uuid
 import requests
@@ -16,10 +17,369 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from aegis.models import RegisteredService
+from aegis.models import FarmCalendarResourceCache, RegisteredService
+from aegis.services.fc_catalog_sync import upsert_fc_cache_from_payload
+from aegis.services.entitlement_service import resolve_service_entitlements_for_user
 from aegis.utils.service_utils import match_endpoint
 
 LOG = logging.getLogger(__name__)
+
+
+FC_SERVICE_IDENTIFIERS = {"farmcalendar", "fc"}
+METHOD_ACTION_MAP = {
+    "GET": "view",
+    "HEAD": "view",
+    "OPTIONS": "view",
+    "POST": "add",
+    "PUT": "edit",
+    "PATCH": "edit",
+    "DELETE": "delete",
+}
+
+
+def _normalize_service_key(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def _is_fc_service_name(value: Optional[str]) -> bool:
+    normalized = _normalize_service_key(value)
+    return normalized in FC_SERVICE_IDENTIFIERS or normalized == "farm calendar"
+
+
+def _is_json_media_type(content_type: Optional[str]) -> bool:
+    if not content_type:
+        return False
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _extract_uuidish(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return _extract_uuidish(value.get("@id") or value.get("id"))
+    if isinstance(value, list):
+        for item in value:
+            extracted = _extract_uuidish(item)
+            if extracted:
+                return extracted
+        return None
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if ":" in candidate:
+        candidate = candidate.split(":")[-1]
+    return candidate or None
+
+
+def _collect_scope_targets(item: object) -> tuple[set[str], set[str]]:
+    farm_ids: set[str] = set()
+    parcel_ids: set[str] = set()
+
+    def _visit(value: object) -> None:
+        if value is None:
+            return
+        if isinstance(value, list):
+            for entry in value:
+                _visit(entry)
+            return
+        if isinstance(value, dict):
+            item_id = _extract_uuidish(value.get("@id") or value.get("id"))
+            item_type = _normalize_service_key(value.get("@type") or value.get("resource_type"))
+            if item_type == "farm" and item_id:
+                farm_ids.add(item_id)
+            elif item_type == "parcel" and item_id:
+                parcel_ids.add(item_id)
+
+            direct_farm = _extract_uuidish(value.get("farm") or value.get("farm_id"))
+            if direct_farm:
+                farm_ids.add(direct_farm)
+
+            for key in ("parcel", "farm_parcel", "agriParcel", "hasAgriParcel", "parcel_id"):
+                candidate = value.get(key)
+                if isinstance(candidate, list):
+                    for entry in candidate:
+                        extracted = _extract_uuidish(entry)
+                        if extracted:
+                            parcel_ids.add(extracted)
+                else:
+                    extracted = _extract_uuidish(candidate)
+                    if extracted:
+                        parcel_ids.add(extracted)
+
+            for nested in value.values():
+                _visit(nested)
+            return
+
+        extracted = _extract_uuidish(value)
+        if extracted:
+            # Standalone scalars are ambiguous, so ignore them unless wrapped in a typed dict.
+            return
+
+    _visit(item)
+    return farm_ids, parcel_ids
+
+
+def _targets_within_scope(
+    farm_ids: set[str],
+    parcel_ids: set[str],
+    allowed_farms: set[str],
+    allowed_parcels: set[str],
+    parcel_to_farm: dict[str, Optional[str]],
+    tenant_id: Optional[str],
+    farm_tenants: dict[str, Optional[str]],
+    parcel_tenants: dict[str, Optional[str]],
+) -> bool:
+    if not farm_ids and not parcel_ids:
+        return True
+
+    for farm_id in farm_ids:
+        if not _farm_within_tenant(farm_id, tenant_id, farm_tenants):
+            return False
+        if farm_id not in allowed_farms:
+            return False
+
+    for parcel_id in parcel_ids:
+        if not _parcel_within_tenant(parcel_id, tenant_id, parcel_tenants, parcel_to_farm, farm_tenants):
+            return False
+        if parcel_id in allowed_parcels:
+            continue
+        parent_farm_id = parcel_to_farm.get(parcel_id)
+        if not parent_farm_id or parent_farm_id not in allowed_farms:
+            return False
+
+    return True
+
+
+def _decode_json_body(raw_body: bytes, content_type: str) -> Optional[object]:
+    if not raw_body or not _is_json_media_type(content_type):
+        return None
+    try:
+        return json.loads(raw_body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _fetch_upstream_json(upstream_url: str, headers: dict[str, str], params) -> Optional[object]:
+    try:
+        resp = requests.get(
+            upstream_url,
+            headers=headers,
+            params=params,
+            timeout=(10, 60),
+        )
+    except requests.RequestException:
+        return None
+
+    if resp.status_code != 200 or not _is_json_media_type(resp.headers.get("Content-Type", "")):
+        return None
+
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def _resolve_fc_write_targets(
+    method: str,
+    upstream_url: str,
+    headers: dict[str, str],
+    params,
+    raw_body: bytes,
+    content_type: str,
+) -> tuple[set[str], set[str]]:
+    body_data = _decode_json_body(raw_body, content_type)
+    if body_data is not None:
+        return _collect_scope_targets(body_data)
+
+    if method in {"PUT", "PATCH", "DELETE"}:
+        upstream_data = _fetch_upstream_json(upstream_url, headers, params)
+        if upstream_data is not None:
+            return _collect_scope_targets(upstream_data)
+
+    return set(), set()
+
+
+def _get_fc_entitlement(user):
+    for service in resolve_service_entitlements_for_user(user):
+        if _is_fc_service_name(service.get("code")) or _is_fc_service_name(service.get("name")):
+            return service
+    return None
+
+
+def _parcel_to_farm_map():
+    mapping: dict[str, Optional[str]] = {}
+    for resource_id, farm_id in (
+        FarmCalendarResourceCache.objects.filter(status=1, resource_type="parcel")
+        .values_list("resource_id", "farm_id")
+    ):
+        if resource_id is None:
+            continue
+        mapping[str(resource_id)] = str(farm_id) if farm_id else None
+    return mapping
+
+
+def _resource_tenant_maps() -> tuple[dict[str, Optional[str]], dict[str, Optional[str]]]:
+    farm_tenants: dict[str, Optional[str]] = {}
+    parcel_tenants: dict[str, Optional[str]] = {}
+    for resource_type, resource_id, tenant_id in (
+        FarmCalendarResourceCache.objects.filter(
+            status=1,
+            resource_type__in=("farm", "parcel"),
+        ).values_list("resource_type", "resource_id", "tenant_id")
+    ):
+        if resource_id is None:
+            continue
+        normalized_tenant = str(tenant_id) if tenant_id else None
+        if resource_type == "farm":
+            farm_tenants[str(resource_id)] = normalized_tenant
+        elif resource_type == "parcel":
+            parcel_tenants[str(resource_id)] = normalized_tenant
+    return farm_tenants, parcel_tenants
+
+
+def _farm_within_tenant(farm_id: Optional[str], tenant_id: Optional[str], farm_tenants: dict[str, Optional[str]]) -> bool:
+    if not tenant_id:
+        return True
+    if not farm_id:
+        return False
+    return farm_tenants.get(farm_id) == tenant_id
+
+
+def _parcel_within_tenant(
+    parcel_id: Optional[str],
+    tenant_id: Optional[str],
+    parcel_tenants: dict[str, Optional[str]],
+    parcel_to_farm: dict[str, Optional[str]],
+    farm_tenants: dict[str, Optional[str]],
+) -> bool:
+    if not tenant_id:
+        return True
+    if not parcel_id:
+        return False
+    if parcel_id in parcel_tenants:
+        return parcel_tenants.get(parcel_id) == tenant_id
+    parent_farm_id = parcel_to_farm.get(parcel_id)
+    return _farm_within_tenant(parent_farm_id, tenant_id, farm_tenants)
+
+
+def _farm_allowed(
+    farm_id: Optional[str],
+    allowed_farms: set[str],
+    tenant_id: Optional[str],
+    farm_tenants: dict[str, Optional[str]],
+) -> bool:
+    return bool(
+        farm_id
+        and farm_id in allowed_farms
+        and _farm_within_tenant(farm_id, tenant_id, farm_tenants)
+    )
+
+
+def _parcel_allowed(
+    parcel_id: Optional[str],
+    allowed_parcels: set[str],
+    allowed_farms: set[str],
+    parcel_to_farm: dict[str, Optional[str]],
+    tenant_id: Optional[str],
+    farm_tenants: dict[str, Optional[str]],
+    parcel_tenants: dict[str, Optional[str]],
+) -> bool:
+    if not parcel_id:
+        return False
+    if not _parcel_within_tenant(parcel_id, tenant_id, parcel_tenants, parcel_to_farm, farm_tenants):
+        return False
+    if parcel_id in allowed_parcels:
+        return True
+    parent_farm_id = parcel_to_farm.get(parcel_id)
+    return bool(parent_farm_id and parent_farm_id in allowed_farms)
+
+
+def _item_allowed_for_fc(
+    item: dict,
+    allowed_farms: set[str],
+    allowed_parcels: set[str],
+    parcel_to_farm: dict[str, Optional[str]],
+    tenant_id: Optional[str],
+    farm_tenants: dict[str, Optional[str]],
+    parcel_tenants: dict[str, Optional[str]],
+) -> bool:
+    item_id = _extract_uuidish(item.get("@id") or item.get("id"))
+    item_type = _normalize_service_key(item.get("@type") or item.get("resource_type"))
+
+    if item_type == "farm" and item_id:
+        return _farm_allowed(item_id, allowed_farms, tenant_id, farm_tenants)
+    if item_type == "parcel" and item_id:
+        return _parcel_allowed(item_id, allowed_parcels, allowed_farms, parcel_to_farm, tenant_id, farm_tenants, parcel_tenants)
+
+    farm_ids, parcel_ids = _collect_scope_targets(item)
+
+    if farm_ids or parcel_ids:
+        return _targets_within_scope(
+            farm_ids,
+            parcel_ids,
+            allowed_farms,
+            allowed_parcels,
+            parcel_to_farm,
+            tenant_id,
+            farm_tenants,
+            parcel_tenants,
+        )
+
+    # If a resource has no farm/parcel relationship fields, do not scope-filter it here.
+    return item_type not in {"farm", "parcel"} and not any(
+        key in item for key in ("farm", "parcel", "farm_parcel", "agriParcel", "hasAgriParcel", "parcel_id")
+    )
+
+
+def _filter_fc_payload(data, allowed_farms: set[str], allowed_parcels: set[str], tenant_id: Optional[str]) -> tuple[object, bool]:
+    parcel_to_farm = _parcel_to_farm_map()
+    farm_tenants, parcel_tenants = _resource_tenant_maps()
+
+    if isinstance(data, list):
+        filtered = [
+            item for item in data
+            if not isinstance(item, dict) or _item_allowed_for_fc(item, allowed_farms, allowed_parcels, parcel_to_farm, tenant_id, farm_tenants, parcel_tenants)
+        ]
+        return filtered, len(filtered) != len(data)
+
+    if isinstance(data, dict):
+        if "@graph" in data and isinstance(data["@graph"], list):
+            filtered_graph = [
+                item for item in data["@graph"]
+                if not isinstance(item, dict) or _item_allowed_for_fc(item, allowed_farms, allowed_parcels, parcel_to_farm, tenant_id, farm_tenants, parcel_tenants)
+            ]
+            changed = len(filtered_graph) != len(data["@graph"])
+            filtered_payload = dict(data)
+            filtered_payload["@graph"] = filtered_graph
+            if "hydra:member" in filtered_payload and isinstance(filtered_payload["hydra:member"], list):
+                filtered_payload["hydra:member"] = filtered_graph
+            if "count" in filtered_payload and changed:
+                filtered_payload["count"] = len(filtered_graph)
+            if "hydra:totalItems" in filtered_payload and changed:
+                filtered_payload["hydra:totalItems"] = len(filtered_graph)
+            return filtered_payload, changed
+
+        if "results" in data and isinstance(data["results"], list):
+            filtered_results = [
+                item for item in data["results"]
+                if not isinstance(item, dict) or _item_allowed_for_fc(item, allowed_farms, allowed_parcels, parcel_to_farm, tenant_id, farm_tenants, parcel_tenants)
+            ]
+            changed = len(filtered_results) != len(data["results"])
+            filtered_payload = dict(data)
+            filtered_payload["results"] = filtered_results
+            if "count" in filtered_payload and changed:
+                filtered_payload["count"] = len(filtered_results)
+            return filtered_payload, changed
+
+        if _item_allowed_for_fc(data, allowed_farms, allowed_parcels, parcel_to_farm, tenant_id, farm_tenants, parcel_tenants):
+            return data, False
+        return {"detail": "Not found."}, True
+
+    return data, False
+
 
 class RegisterServiceAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -331,6 +691,7 @@ class NewReverseProxyAPIView(APIView):
         LOG.debug("[GK][dispatch_request] method=%s path=%s", request.method, path)
 
         try:
+            scope_filter_summary = None
             # -------- Correlation + basic request info --------
             corr_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
             req_ct = (request.META.get("CONTENT_TYPE") or "").lower()
@@ -344,8 +705,8 @@ class NewReverseProxyAPIView(APIView):
             service_name = path_parts[0] if len(path_parts) > 0 else None
             endpoint = '/'.join(path_parts[1:]) if len(path_parts) > 1 else None
 
-            LOG.info("GK IN ↘ method=%s path=%s svc=%s ip=%s ct=%s cl=%s corr=%s",
-                     request.method, path, service_name, client_ip, req_ct, req_cl, corr_id)
+            LOG.debug("GK IN ↘ method=%s path=%s svc=%s ip=%s ct=%s cl=%s corr=%s",
+                      request.method, path, service_name, client_ip, req_ct, req_cl, corr_id)
 
             if service_name:
                 LOG.debug("[GK][dispatch_request] svc=%s endpoint=%s", service_name, endpoint)
@@ -413,13 +774,13 @@ class NewReverseProxyAPIView(APIView):
 
             # -------- Build upstream URL (query handled via params=request.GET) --------
             upstream_url = f"{service_entry.base_url}{resolved_endpoint.lstrip('/')}"
-            LOG.info("GK ROUTE → upstream=%s svc=%s corr=%s",
-                     upstream_url, service_entry.service_name, corr_id)
+            LOG.debug("GK ROUTE → upstream=%s svc=%s corr=%s",
+                      upstream_url, service_entry.service_name, corr_id)
 
             # -------- Forward headers (strip hop-by-hop; add X-Forwarded-*; propagate corr id) --------
             hop_by_hop = {
                 "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-                "te", "trailers", "transfer-encoding", "upgrade"
+                "te", "trailers", "transfer-encoding", "upgrade", "content-length"
             }
 
             forward_headers = {}
@@ -469,6 +830,79 @@ class NewReverseProxyAPIView(APIView):
                 # Always pass exact bytes to preserve multipart boundary & file payload
                 request_kwargs["data"] = raw_body
 
+            if method != "OPTIONS" and _is_fc_service_name(service_entry.service_name):
+                fc_entitlement = _get_fc_entitlement(request.user)
+                if not fc_entitlement and not getattr(request.user, "is_superuser", False):
+                    LOG.warning(
+                        "GK PROXY DENY method=%s svc=%s path=%s user=%s reason=no_entitlement corr=%s",
+                        method,
+                        service_entry.service_name,
+                        path,
+                        getattr(request.user, "username", "-"),
+                        corr_id,
+                    )
+                    return JsonResponse(
+                        {"error": "You do not have access to this FarmCalendar service."},
+                        status=403,
+                    )
+                if fc_entitlement and not fc_entitlement.get("unrestricted"):
+                    required_action = METHOD_ACTION_MAP.get(method)
+                    allowed_actions = set(fc_entitlement.get("actions", []) or [])
+                    allowed_farms = set(fc_entitlement.get("scopes", {}).get("farm", []) or [])
+                    allowed_parcels = set(fc_entitlement.get("scopes", {}).get("parcel", []) or [])
+
+                    if required_action and required_action not in allowed_actions:
+                        LOG.warning(
+                            "GK PROXY DENY method=%s svc=%s path=%s user=%s reason=missing_action required=%s corr=%s",
+                            method,
+                            service_entry.service_name,
+                            path,
+                            getattr(request.user, "username", "-"),
+                            required_action,
+                            corr_id,
+                        )
+                        return JsonResponse(
+                            {"error": f"Action '{required_action}' is not allowed for this service."},
+                            status=403,
+                        )
+
+                    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+                        target_farms, target_parcels = _resolve_fc_write_targets(
+                            method=method,
+                            upstream_url=upstream_url,
+                            headers=forward_headers,
+                            params=request.GET,
+                            raw_body=raw_body,
+                            content_type=req_ct,
+                        )
+                        parcel_to_farm = _parcel_to_farm_map()
+                        farm_tenants, parcel_tenants = _resource_tenant_maps()
+                        tenant_id = str(request.user.tenant_id) if getattr(request.user, "tenant_id", None) else None
+                        if not _targets_within_scope(
+                            target_farms,
+                            target_parcels,
+                            allowed_farms,
+                            allowed_parcels,
+                            parcel_to_farm,
+                            tenant_id,
+                            farm_tenants,
+                            parcel_tenants,
+                        ):
+                            LOG.warning(
+                                "GK PROXY DENY method=%s svc=%s path=%s user=%s reason=scope target_farms=%s target_parcels=%s corr=%s",
+                                method,
+                                service_entry.service_name,
+                                path,
+                                getattr(request.user, "username", "-"),
+                                sorted(target_farms),
+                                sorted(target_parcels),
+                                corr_id,
+                            )
+                            return JsonResponse(
+                                {"error": "This target is outside your allowed FarmCalendar scope."},
+                                status=403,
+                            )
+
             # -------- Call upstream --------
             LOG.debug("[GK][dispatch_request] calling upstream method=%s url=%s headers=%s",
                       method, upstream_url, list(forward_headers.keys()))
@@ -477,8 +911,8 @@ class NewReverseProxyAPIView(APIView):
 
             resp_ct = resp.headers.get("Content-Type", "")
             resp_cl = resp.headers.get("Content-Length")
-            LOG.info("GK OUT ↗ method=%s status=%s ct=%s cl=%s corr=%s",
-                     method, resp.status_code, resp_ct, resp_cl, corr_id)
+            LOG.debug("GK OUT ↗ method=%s status=%s ct=%s cl=%s corr=%s",
+                      method, resp.status_code, resp_ct, resp_cl, corr_id)
 
             if resp.status_code >= 400:
                 try:
@@ -489,6 +923,74 @@ class NewReverseProxyAPIView(APIView):
                 except Exception:
                     LOG.warning("UPSTREAM ERR (no preview) corr=%s", corr_id)
 
+            if (
+                method in {"POST", "PUT", "PATCH"}
+                and 200 <= resp.status_code < 300
+                and _is_json_media_type(resp_ct)
+                and _is_fc_service_name(service_entry.service_name)
+            ):
+                payload = resp.json()
+                stamped_rows = upsert_fc_cache_from_payload(
+                    payload,
+                    tenant=getattr(request.user, "tenant", None),
+                )
+                if stamped_rows:
+                    LOG.info(
+                        "GK FC CACHE stamped=%s user=%s tenant=%s corr=%s",
+                        stamped_rows,
+                        getattr(request.user, "username", "-"),
+                        getattr(request.user, "tenant_id", None),
+                        corr_id,
+                    )
+                return JsonResponse(
+                    payload,
+                    safe=not isinstance(payload, list),
+                    status=resp.status_code,
+                    content_type=resp_ct,
+                )
+
+            if (
+                method == "GET"
+                and resp.status_code == 200
+                and _is_json_media_type(resp_ct)
+                and _is_fc_service_name(service_entry.service_name)
+            ):
+                fc_entitlement = _get_fc_entitlement(request.user)
+                if fc_entitlement and not fc_entitlement.get("unrestricted"):
+                    allowed_farms = set(fc_entitlement.get("scopes", {}).get("farm", []) or [])
+                    allowed_parcels = set(fc_entitlement.get("scopes", {}).get("parcel", []) or [])
+                    tenant_id = str(request.user.tenant_id) if getattr(request.user, "tenant_id", None) else None
+                    response_data = resp.json()
+                    filtered_payload, changed = _filter_fc_payload(response_data, allowed_farms, allowed_parcels, tenant_id)
+                    if changed:
+                        scope_filter_summary = (
+                            f"scope_filter=on allowed_farms={len(allowed_farms)} "
+                            f"allowed_parcels={len(allowed_parcels)}"
+                        )
+                    else:
+                        scope_filter_summary = (
+                            f"scope_filter=checked allowed_farms={len(allowed_farms)} "
+                            f"allowed_parcels={len(allowed_parcels)}"
+                        )
+                    status_code = 404 if isinstance(filtered_payload, dict) and filtered_payload.get("detail") == "Not found." else resp.status_code
+                    LOG.info(
+                        "GK PROXY method=%s svc=%s path=%s upstream=%s status=%s user=%s %s corr=%s",
+                        method,
+                        service_entry.service_name,
+                        path,
+                        upstream_url,
+                        status_code,
+                        getattr(request.user, "username", "-"),
+                        scope_filter_summary,
+                        corr_id,
+                    )
+                    return JsonResponse(
+                        filtered_payload,
+                        safe=not isinstance(filtered_payload, list),
+                        status=status_code,
+                        content_type=resp_ct,
+                    )
+
             excluded_resp = {"content-encoding", "transfer-encoding", "connection"}
             django_resp = StreamingHttpResponse(resp.iter_content(chunk_size=64 * 1024),
                                                 status=resp.status_code)
@@ -496,6 +998,18 @@ class NewReverseProxyAPIView(APIView):
             for k, v in resp.headers.items():
                 if k.lower() not in excluded_resp:
                     django_resp[k] = v
+
+            LOG.info(
+                "GK PROXY method=%s svc=%s path=%s upstream=%s status=%s user=%s %s corr=%s",
+                method,
+                service_entry.service_name,
+                path,
+                upstream_url,
+                resp.status_code,
+                getattr(request.user, "username", "-"),
+                scope_filter_summary or "scope_filter=off",
+                corr_id,
+            )
 
             return django_resp
 
@@ -528,4 +1042,3 @@ class NewReverseProxyAPIView(APIView):
         path = kwargs.get("path", "")
         LOG.debug("[GK][options] forwarding OPTIONS for path=%s", path)
         return self.dispatch_request(request, path)
-

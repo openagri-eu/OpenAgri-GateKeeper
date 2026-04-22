@@ -1,7 +1,9 @@
+# aegis/templatetags/custom_filters.py
+
 from django import template
 
-register = template.Library()
 
+register = template.Library()
 
 @register.filter
 def remove_chars(value):

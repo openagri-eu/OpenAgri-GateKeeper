@@ -2,8 +2,6 @@
 
 import logging
 
-from collections import defaultdict
-
 # from django import forms
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import never_cache
@@ -20,11 +18,18 @@ from datetime import datetime, timezone
 
 # from aegis.forms import UserRegistrationForm
 # from aegis.services.auth_services import register_user
-from aegis.models import BlacklistedRefresh, BlacklistedAccess, CustomPermissions, GroupCustomPermissions
+from aegis.models import BlacklistedRefresh, BlacklistedAccess, FarmCalendarResourceCache
 from aegis.serializers import CustomTokenObtainPairSerializer
+from aegis.services.entitlement_service import resolve_service_entitlements_for_user
 
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+
+
+def _is_fc_service_payload(service_payload):
+    code = (service_payload.get("code") or "").strip().lower()
+    name = (service_payload.get("name") or "").strip().lower()
+    return code in {"fc", "farmcalendar"} or name in {"farmcalendar", "farm calendar"}
 
 
 @method_decorator(never_cache, name='dispatch')
@@ -188,57 +193,111 @@ class MeAPIView(APIView):
             "first_name": u.first_name,
             "last_name": u.last_name,
             "groups": groups,
+            "tenant_id": str(u.tenant_id) if getattr(u, "tenant_id", None) else None,
+            "tenant_code": getattr(getattr(u, "tenant", None), "code", None),
+            "tenant_name": getattr(getattr(u, "tenant", None), "name", None),
+            "is_platform_admin": bool(getattr(u, "is_superuser", False)),
+            "is_tenant_admin": bool(getattr(u, "is_tenant_admin", False)),
         }
 
-        # Build "services" payload
-        svc_map = defaultdict(lambda: {"name": None, "actions": set()})
-
-        # via group custom permissions
-        group_rows = (
-            GroupCustomPermissions.objects
-            .filter(
-                group__in=u.groups.all(), status=1,
-                permission_names__status=1,
-                permission_names__service__status=1,
-            )
-            .values_list(
-                "permission_names__service__service_code",
-                "permission_names__service__service_name",
-                "permission_names__action",
-            )
-        )
-        for code, name, action in group_rows:
-            if code and action:
-                if not svc_map[code]["name"]:
-                    svc_map[code]["name"] = name
-                svc_map[code]["actions"].add(action)
-
-        # via direct user custom permissions
-        user_rows = (
-            CustomPermissions.objects
-            .filter(
-                user=u, status=1,
-                permission_name__status=1,
-                permission_name__service__status=1,
-            )
-            .values_list(
-                "permission_name__service__service_code",
-                "permission_name__service__service_name",
-                "permission_name__action",
-            )
-        )
-        for code, name, action in user_rows:
-            if code and action:
-                if not svc_map[code]["name"]:
-                    svc_map[code]["name"] = name
-                svc_map[code]["actions"].add(action)
-
-        services_payload = [
-            {"code": code, "name": data["name"] or code, "actions": sorted(data["actions"])}
-            for code, data in sorted(svc_map.items())
-        ]
+        services_payload = resolve_service_entitlements_for_user(u)
 
         return Response({
             "user": user_payload,
             "services": services_payload,
+        }, status=status.HTTP_200_OK)
+
+
+class FarmCalendarScopeAPIView(APIView):
+    """
+    GET /api/farmcalendar-scopes/
+    Returns a UI-friendly flattened entitlement block for FarmCalendar.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        services_payload = resolve_service_entitlements_for_user(request.user)
+        fc_payload = next((s for s in services_payload if _is_fc_service_payload(s)), None)
+
+        if fc_payload is None:
+            fc_payload = {
+                "code": "FC",
+                "name": "FarmCalendar",
+                "roles": [],
+                "actions": [],
+                "scopes": {},
+                "assignments": [],
+                "unrestricted": False,
+            }
+
+        scopes = fc_payload.get("scopes", {}) or {}
+        farm_ids = scopes.get("farm", []) if isinstance(scopes.get("farm", []), list) else []
+        parcel_ids = scopes.get("parcel", []) if isinstance(scopes.get("parcel", []), list) else []
+
+        return Response({
+            "service": {
+                "code": fc_payload.get("code", "FC"),
+                "name": fc_payload.get("name", "FarmCalendar"),
+            },
+            "tenant": {
+                "id": str(request.user.tenant_id) if getattr(request.user, "tenant_id", None) else None,
+                "code": getattr(getattr(request.user, "tenant", None), "code", None),
+                "name": getattr(getattr(request.user, "tenant", None), "name", None),
+            },
+            "roles": fc_payload.get("roles", []),
+            "actions": fc_payload.get("actions", []),
+            "assignments": fc_payload.get("assignments", []),
+            "unrestricted": bool(fc_payload.get("unrestricted", False)),
+            "scopes": {
+                "farm": farm_ids,
+                "parcel": parcel_ids,
+            },
+            "summary": {
+                "farm_count": len(farm_ids),
+                "parcel_count": len(parcel_ids),
+            },
+        }, status=status.HTTP_200_OK)
+
+
+class FarmCalendarCatalogAPIView(APIView):
+    """
+    GET /api/farmcalendar-catalog/
+    Returns cached Farm and FarmParcel data synced from FC.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tenant_filter = {}
+        if not getattr(request.user, "is_superuser", False) and getattr(request.user, "tenant_id", None):
+            tenant_filter["tenant_id"] = request.user.tenant_id
+
+        farms_qs = FarmCalendarResourceCache.objects.filter(
+            status=1, resource_type="farm", **tenant_filter
+        ).order_by("name", "resource_id")
+        parcels_qs = FarmCalendarResourceCache.objects.filter(
+            status=1, resource_type="parcel", **tenant_filter
+        ).order_by("name", "resource_id")
+
+        farms = [{
+            "id": str(row.resource_id),
+            "name": row.name or "",
+            "payload": row.payload,
+            "synced_at": row.synced_at.isoformat() if row.synced_at else None,
+        } for row in farms_qs]
+
+        parcels = [{
+            "id": str(row.resource_id),
+            "name": row.name or "",
+            "farm_id": str(row.farm_id) if row.farm_id else None,
+            "payload": row.payload,
+            "synced_at": row.synced_at.isoformat() if row.synced_at else None,
+        } for row in parcels_qs]
+
+        return Response({
+            "summary": {
+                "farm_count": len(farms),
+                "parcel_count": len(parcels),
+            },
+            "farms": farms,
+            "parcels": parcels,
         }, status=status.HTTP_200_OK)
