@@ -9,6 +9,8 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from aegis.services.entitlement_service import resolve_service_entitlements_for_user
+
 if TYPE_CHECKING:
     from aegis.models import DefaultAuthUserExtend
 
@@ -24,6 +26,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         token["last_name"] = user.last_name
         # token["service_name"] = user.service_name
         token["uuid"] = str(getattr(user, "uuid", ""))
+        token["service_access"] = resolve_service_entitlements_for_user(user)
         return token
 
     def validate(self, attrs):

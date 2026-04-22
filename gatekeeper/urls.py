@@ -3,15 +3,19 @@
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
+from django.contrib.auth import logout
 from django.db import connection
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, HttpResponseRedirect
 from django.urls import path, include, re_path
 
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from aegis.views import LoginView, WhoAmIView
 from aegis.views.home_view import HomeView
-from aegis.views.api.auth_views import LoginAPIView, LogoutAPIView, TokenValidationAPIView, MeAPIView #, RegisterAPIView
+from aegis.views.api.auth_views import (
+    LoginAPIView, LogoutAPIView, TokenValidationAPIView, MeAPIView, FarmCalendarScopeAPIView,
+    FarmCalendarCatalogAPIView
+)
 from aegis.views.api.service_registry_views import (ServiceDirectoryAPIView, RegisterServiceAPIView,
                                                     DeleteServiceAPIView, NewReverseProxyAPIView)
 from .common import custom_page_not_found_view
@@ -28,17 +32,25 @@ def health_check(request):
     except Exception as e:
         return JsonResponse({"status": "error", "message": str(e)}, status=500)
 
+
+def admin_logout_redirect(request):
+    logout(request)
+    return HttpResponseRedirect("/admin/login/?next=/admin/")
+
 urlpatterns = [
     # path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')),
 
     path('', HomeView.as_view(), name='home'),
 
+    path('admin/logout/', admin_logout_redirect, name='admin_logout_redirect'),
     path('admin/', admin.site.urls),
 
     path('login/', LoginView.as_view(), name='login'),
     # path('register/', RegisterView.as_view(), name='register'),
 
     path('api/me/', MeAPIView.as_view(), name='api_me'),
+    path('api/farmcalendar-scopes/', FarmCalendarScopeAPIView.as_view(), name='api_farmcalendar_scopes'),
+    path('api/farmcalendar-catalog/', FarmCalendarCatalogAPIView.as_view(), name='api_farmcalendar_catalog'),
     path('api/login/', LoginAPIView.as_view(), name='api_login'),
     path('api/logout/', LogoutAPIView.as_view(), name='api_logout'),
     # path('api/register/', RegisterAPIView.as_view(), name='api_register'),

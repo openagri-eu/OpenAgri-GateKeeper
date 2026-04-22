@@ -2,15 +2,15 @@ services:
   mysql:
     image: mysql:8.0
     build: .
-    restart: no
+    restart: always
     container_name: oa_gk_mysql_django
     env_file:
       - .env
     environment:
-      MYSQL_DATABASE: gatekeeper
-      MYSQL_ROOT_PASSWORD: asdasdasd
-      MYSQL_USER: gatekeeper_admin
-      MYSQL_PASSWORD: asdasdasd
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     ports:
       - "3312:3306"
     volumes:
@@ -26,9 +26,13 @@ services:
   phpmyadmin_gatekeeper:
     image: phpmyadmin/phpmyadmin
     container_name: oa_gk_phpmyadmin_django
-    restart: no
+    restart: always
     env_file:
       - .env
+    environment:
+      PMA_HOST: ${PMA_HOST}
+      PMA_USER: ${PMA_USER}
+      PMA_PASSWORD: ${PMA_PASSWORD}
     ports:
       - "8088:80"
     networks:

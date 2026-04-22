@@ -14,6 +14,11 @@ services:
       - asset_volume:/var/www/assets
       - media_volume:/var/www/media
       - logs_volume:/var/www/logs
+    networks:
+      default: {}
+      openagri_oa_network:
+        aliases:
+          - gatekeeper
     ports:
       - "8001:8001"
 
@@ -22,3 +27,6 @@ volumes:
   media_volume:
   logs_volume:
 
+networks:
+  openagri_oa_network:
+    external: true
