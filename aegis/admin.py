@@ -316,6 +316,16 @@ class HiddenAdminMixin:
 class TenantScopedAdminMixin:
     tenant_field_name = "tenant"
 
+    @staticmethod
+    def _disable_related_widget_controls(form, *field_names):
+        for field_name in field_names:
+            if field_name not in getattr(form, "base_fields", {}):
+                continue
+            widget = form.base_fields[field_name].widget
+            for attr_name in ("can_add_related", "can_change_related", "can_delete_related", "can_view_related"):
+                if hasattr(widget, attr_name):
+                    setattr(widget, attr_name, False)
+
     def _is_tenant_admin(self, request):
         return bool(
             request.user
@@ -500,6 +510,7 @@ class DefaultAuthUserExtendAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMix
 
     def get_form(self, request, obj=None, change=False, **kwargs):
         form = super().get_form(request, obj, change=change, **kwargs)
+        self._disable_related_widget_controls(form, "tenant")
         if "email" in form.base_fields:
             form.base_fields["email"].required = True
             form.base_fields["email"].help_text = "Required. Must be unique."
@@ -829,6 +840,7 @@ class ServiceRoleAdmin(SuperuserOnlyAdminMixin, HideDeletedByDefaultMixin, Statu
 
     def get_form(self, request, obj=None, change=False, **kwargs):
         form = super().get_form(request, obj, change=change, **kwargs)
+        self._disable_related_widget_controls(form, "tenant")
         if not request.user.is_superuser and "tenant" in form.base_fields:
             form.base_fields["tenant"].queryset = Tenant.objects.filter(id=request.user.tenant_id)
             form.base_fields["tenant"].initial = request.user.tenant_id
@@ -996,6 +1008,7 @@ class ServiceScopeAssignmentAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMi
                 super().__init__(*args, **inner_kwargs)
 
         form = RequestAwareServiceScopeAssignmentForm
+        self._disable_related_widget_controls(form, "tenant")
         if request.user.is_superuser:
             if "service" in form.base_fields:
                 form.base_fields["service"].queryset = ServiceMaster.objects.filter(status=1).order_by("service_code")
