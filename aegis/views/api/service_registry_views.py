@@ -20,7 +20,6 @@ from rest_framework.views import APIView
 from aegis.models import FarmCalendarResourceCache, RegisteredService
 from aegis.services.fc_catalog_sync import upsert_fc_cache_from_payload
 from aegis.services.entitlement_service import resolve_service_entitlements_for_user
-from aegis.utils.service_utils import match_endpoint
 
 LOG = logging.getLogger(__name__)
 
@@ -529,7 +528,13 @@ class RegisterServiceAPIView(APIView):
             )
 
             for existing_service in existing_services:
-                if match_endpoint(endpoint, existing_service.endpoint):
+                # De-duplicate on the exact endpoint string only. Matching a
+                # literal endpoint against another endpoint's {placeholder} here
+                # would merge two genuinely different routes into one row (e.g.
+                # 'openagri-report/irrigation-report/' clobbering the retrieval
+                # route 'openagri-report/{report_id}/'), silently dropping the
+                # other route from the registry.
+                if endpoint.strip('/') == existing_service.endpoint.strip('/'):
                     # Update the existing service with new data
                     existing_service.base_url = base_url
                     existing_service.service_name = service_name
@@ -697,6 +702,55 @@ class DeleteServiceAPIView(APIView):
             )
 
 
+def _endpoint_matches(stored_endpoint: str, incoming_endpoint: str) -> bool:
+    """
+    True if an incoming request path matches a stored endpoint. A stored
+    endpoint containing ``{placeholders}`` matches any single path segment in
+    that position; a plain endpoint must match exactly (ignoring slashes).
+    """
+    if '{' in stored_endpoint and '}' in stored_endpoint:
+        safe_endpoint = re.escape(stored_endpoint)
+        pattern = re.sub(r"\\\{[^\}]+\\\}", r"[^/]+", safe_endpoint)
+        return re.fullmatch(pattern, incoming_endpoint) is not None
+    return stored_endpoint.strip('/') == incoming_endpoint.strip('/')
+
+
+def select_matching_service(services, incoming_endpoint: str, method: str):
+    """
+    Pick the registered service row that should handle a request.
+
+    Preference order:
+      1. Exact (non-templated) endpoint matches before templated ({id}) matches,
+         so a literal path (e.g. '.../irrigation-report/') is never shadowed by a
+         sibling template (e.g. '.../{report_id}/') that also matches it.
+      2. Within each group, a row whose ``methods`` allow the request method, so
+         overlapping literal/template registrations with different method sets
+         each route correctly (OPTIONS is always allowed through for proxying).
+
+    Returns ``(service_entry, endpoint_matched)``:
+      * ``service_entry`` – the chosen row, or ``None``.
+      * ``endpoint_matched`` – True if some row matched the path even when no row
+        allowed the method, so the caller can distinguish 405 from 404.
+    """
+    literal_matches = []
+    template_matches = []
+    for service in services:
+        stored = service.endpoint
+        if not stored or not _endpoint_matches(stored, incoming_endpoint):
+            continue
+        if '{' in stored and '}' in stored:
+            template_matches.append(service)
+        else:
+            literal_matches.append(service)
+
+    endpoint_matched = bool(literal_matches or template_matches)
+    for group in (literal_matches, template_matches):
+        for service in group:
+            if method == "OPTIONS" or method in (service.methods or []):
+                return service, endpoint_matched
+    return None, endpoint_matched
+
+
 class NewReverseProxyAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = []
@@ -770,46 +824,27 @@ class NewReverseProxyAPIView(APIView):
             # Query the database for matching service and endpoint pattern
             services = RegisteredService.objects.filter(service_name=service_name, status=1)
 
-            service_entry = None
-            # Filter by service name
-            for service in services:
-                # Ensure service.endpoint is valid
-                if not service.endpoint:
-                    continue
-
-                # Check if the stored endpoint has placeholders
-                if '{' in service.endpoint and '}' in service.endpoint:
-                    # Convert placeholders to a regex pattern
-                    safe_endpoint = re.escape(service.endpoint)
-                    pattern = re.sub(r"\\\{[^\}]+\\\}", r"[^/]+", safe_endpoint)
-
-                    # Match the incoming endpoint to the regex pattern
-                    if re.fullmatch(pattern, cast(str, endpoint)):
-                        service_entry = service
-                        LOG.debug("[GK][dispatch_request] matched templated endpoint '%s'",
-                                  service.endpoint)
-                        break
-                else:
-                    # Direct match for endpoints without placeholders
-                    if service.endpoint.strip('/') == endpoint.strip('/'):
-                        service_entry = service
-                        LOG.debug("[GK][dispatch_request] matched plain endpoint '%s'",
-                                  service.endpoint)
-                        break
+            # Prefer an exact endpoint match over a templated one, and pick a row
+            # whose methods allow this request, so overlapping literal/template
+            # registrations (e.g. '.../irrigation-report/' vs '.../{report_id}/')
+            # each route correctly instead of depending on DB row order.
+            service_entry, endpoint_matched = select_matching_service(
+                services, cast(str, endpoint), request.method
+            )
 
             if not service_entry:
+                if endpoint_matched:
+                    # The path matched a registration, but none allowed this method.
+                    LOG.warning("GK ROUTE ✖ method-not-allowed method=%s svc=%s endpoint=%s corr=%s",
+                                request.method, service_name, endpoint, corr_id)
+                    return JsonResponse(
+                        {'error': f"Method {request.method} not allowed for this endpoint."},
+                        status=405
+                    )
                 LOG.warning("GK ROUTE ✖ no match svc=%s endpoint=%s corr=%s", service_name, endpoint, corr_id)
                 return JsonResponse({'error': 'No service can provide this resource.'}, status=404)
 
-            # Check if the method is supported
-            # if request.method not in service_entry.methods:
-            if request.method != "OPTIONS" and request.method not in service_entry.methods:
-                LOG.warning("GK ROUTE ✖ method-not-allowed method=%s svc=%s corr=%s",
-                            request.method, service_entry.service_name, corr_id)
-                return JsonResponse(
-                    {'error': f"Method {request.method} not allowed for this endpoint."},
-                    status=405
-                )
+            LOG.debug("[GK][dispatch_request] matched endpoint '%s'", service_entry.endpoint)
 
             # Resolve placeholders if present
             resolved_endpoint = service_entry.endpoint
