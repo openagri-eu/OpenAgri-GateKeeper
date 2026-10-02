@@ -18,8 +18,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
 from aegis.models import FarmCalendarResourceCache, RegisteredService
+from aegis.permissions import IsPlatformSuperuser
 from aegis.services.fc_catalog_sync import upsert_fc_cache_from_payload
 from aegis.services.entitlement_service import resolve_service_entitlements_for_user
+from aegis.services.upstream_security import UpstreamPolicyError, validate_allowed_upstream
 
 LOG = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ METHOD_ACTION_MAP = {
     "PATCH": "edit",
     "DELETE": "delete",
 }
+ALLOWED_PROXY_METHODS = frozenset(METHOD_ACTION_MAP)
 
 
 def _normalize_service_key(value: Optional[str]) -> str:
@@ -50,6 +53,27 @@ def _is_json_media_type(content_type: Optional[str]) -> bool:
         return False
     media_type = content_type.split(";", 1)[0].strip().lower()
     return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _normalize_registered_endpoint(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Endpoint must be a string.")
+
+    endpoint = value.strip()
+    if not endpoint or endpoint.startswith(("/", "\\")):
+        raise ValueError("Endpoint must be a relative path without a leading slash.")
+    if len(endpoint) > 255:
+        raise ValueError("Endpoint must not exceed 255 characters.")
+    if any(character in endpoint for character in ("\\", "?", "#")):
+        raise ValueError("Endpoint must not contain backslashes, query strings, or fragments.")
+
+    segments = endpoint.strip("/").split("/")
+    if any(not segment or segment in {".", ".."} for segment in segments):
+        raise ValueError("Endpoint contains an invalid path segment.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in endpoint):
+        raise ValueError("Endpoint must not contain control characters.")
+
+    return endpoint.strip("/") + "/"
 
 
 def _extract_uuidish(value) -> Optional[str]:
@@ -432,7 +456,7 @@ def _filter_fc_payload(data, allowed_farms: set[str], allowed_parcels: set[str],
 
 
 class RegisterServiceAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsPlatformSuperuser]
 
     def post(self, request):
         # Validate required fields
@@ -445,22 +469,37 @@ class RegisterServiceAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        base_url = request.data.get("base_url").strip()
-        service_name = request.data.get("service_name").strip()
-        endpoint = request.data.get("endpoint").strip()
+        raw_base_url = request.data.get("base_url")
+        raw_service_name = request.data.get("service_name")
+        raw_endpoint = request.data.get("endpoint")
+        if not all(isinstance(value, str) for value in (raw_base_url, raw_service_name, raw_endpoint)):
+            return JsonResponse(
+                {"error": "Base URL, service name, and endpoint must be strings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service_name = raw_service_name.strip()
         methods = request.data.get("methods", ["GET", "POST"])
         params = request.data.get("params", "")
 
-        if not service_name or not endpoint:
+        if not service_name or not raw_endpoint.strip():
             return JsonResponse(
                 {"error": "Service name and endpoint are required."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if not isinstance(methods, list) or not all(isinstance(m, str) for m in methods):
+        if not isinstance(methods, list) or not methods or not all(isinstance(m, str) for m in methods):
             return JsonResponse(
-                {"error": "Methods should be a list of strings."},
+                {"error": "Methods must be a non-empty list of strings."},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+
+        methods = sorted({method.strip().upper() for method in methods if method.strip()})
+        invalid_methods = sorted(set(methods) - ALLOWED_PROXY_METHODS)
+        if not methods or invalid_methods:
+            return JsonResponse(
+                {"error": f"Unsupported proxy methods: {', '.join(invalid_methods) or 'none provided'}."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if not isinstance(params, str):
@@ -469,20 +508,20 @@ class RegisterServiceAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Validate base_url
-        if len(base_url) > 100:
+        try:
+            base_url = validate_allowed_upstream(raw_base_url)
+        except UpstreamPolicyError as exc:
             return JsonResponse(
-                {"error": "Base URL must not exceed 100 characters."},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if not re.match(r"^(http|https)://[a-zA-Z0-9]([a-zA-Z0-9._]*[a-zA-Z0-9])?:[0-9]{1,5}/$", base_url):
+        try:
+            endpoint = _normalize_registered_endpoint(raw_endpoint)
+        except ValueError as exc:
             return JsonResponse(
-                {
-                    "error": "Base URL must follow the format 'http://baseurl:port/' or 'https://baseurl:port/'. "
-                             "The base URL name must only contain alphanumeric characters, dots (.), or underscores (_), "
-                             "and must start and end with an alphanumeric character. The port number must be 1-5 digits."},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Validate service_name
@@ -492,22 +531,6 @@ class RegisterServiceAPIView(APIView):
                           "It cannot start or end with an underscore, and must be less than 30 characters long."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        # Validate endpoint
-        if endpoint.startswith("/") or endpoint.startswith("\\"):
-            return JsonResponse(
-                {"error": "Endpoint must not start with a forward or backward slash."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if len(endpoint) > 100:
-            return JsonResponse(
-                {"error": "Endpoint must not exceed 100 characters."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Ensure consistent formatting (always include trailing slash for endpoint)
-        endpoint = endpoint.rstrip('/') + '/'  # Ensure trailing slash for endpoint
 
         # Construct service_url
         if params:
@@ -590,7 +613,7 @@ class RegisterServiceAPIView(APIView):
 
 
 class ServiceDirectoryAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsPlatformSuperuser]
 
     def get(self, request):
         try:
@@ -634,7 +657,7 @@ class ServiceDirectoryAPIView(APIView):
 
 
 class DeleteServiceAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsPlatformSuperuser]
 
     def delete(self, request):
         base_url = request.query_params.get("base_url")
@@ -772,14 +795,6 @@ class NewReverseProxyAPIView(APIView):
 
         return super().dispatch(request, *args, **kwargs)
 
-    def check_permissions(self, request):
-        # Let OPTIONS pass so we can proxy it
-        if request.method == 'OPTIONS':
-            LOG.debug("[GK][check_permissions] OPTIONS -> skipping permission checks")
-            return
-
-        return super().check_permissions(request)
-
     @staticmethod
     def _scrub_auth(h: Optional[str]) -> str:
         """Hide secrets in Authorization header in logs."""
@@ -846,6 +861,20 @@ class NewReverseProxyAPIView(APIView):
 
             LOG.debug("[GK][dispatch_request] matched endpoint '%s'", service_entry.endpoint)
 
+            try:
+                upstream_base_url = validate_allowed_upstream(service_entry.base_url)
+            except UpstreamPolicyError as exc:
+                LOG.error(
+                    "GK ROUTE rejected disallowed upstream svc=%s reason=%s corr=%s",
+                    service_entry.service_name,
+                    exc,
+                    corr_id,
+                )
+                return JsonResponse(
+                    {"error": "The configured service upstream is not permitted."},
+                    status=502,
+                )
+
             # Resolve placeholders if present
             resolved_endpoint = service_entry.endpoint
             if '{' in resolved_endpoint and '}' in resolved_endpoint:
@@ -859,24 +888,25 @@ class NewReverseProxyAPIView(APIView):
                 )
 
             # -------- Build upstream URL (query handled via params=request.GET) --------
-            upstream_url = f"{service_entry.base_url}{resolved_endpoint.lstrip('/')}"
+            upstream_url = f"{upstream_base_url}{resolved_endpoint.lstrip('/')}"
             LOG.debug("GK ROUTE → upstream=%s svc=%s corr=%s",
                       upstream_url, service_entry.service_name, corr_id)
 
             # -------- Forward headers (strip hop-by-hop; add X-Forwarded-*; propagate corr id) --------
-            hop_by_hop = {
+            blocked_forward_headers = {
                 "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-                "te", "trailers", "transfer-encoding", "upgrade", "content-length"
+                "te", "trailers", "transfer-encoding", "upgrade", "content-length",
+                "cookie", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
+                "x-real-ip", "x-request-id",
             }
 
             forward_headers = {}
             for k, v in request.headers.items():
-                if k.lower() not in hop_by_hop:
+                if k.lower() not in blocked_forward_headers:
                     forward_headers[k] = v
 
-            # Normalise forwards
-            existing_xff = forward_headers.get("X-Forwarded-For")
-            forward_headers["X-Forwarded-For"] = f"{existing_xff}, {client_ip}" if existing_xff else (client_ip or "-")
+            # Rebuild forwarding metadata instead of trusting client-supplied values.
+            forward_headers["X-Forwarded-For"] = client_ip or "-"
             forward_headers["X-Forwarded-Proto"] = request.scheme
             forward_headers["X-Request-ID"] = corr_id
 
