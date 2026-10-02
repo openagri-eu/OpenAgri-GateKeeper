@@ -10,7 +10,17 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import Resolver404, resolve, reverse
 from rest_framework.test import APIClient
 
-from aegis.models import FarmCalendarResourceCache, RegisteredService, Tenant
+from django.core.exceptions import ValidationError
+
+from aegis.models import (
+    FarmCalendarResourceCache,
+    PermissionMaster,
+    RegisteredService,
+    ServiceMaster,
+    ServiceScopeAssignment,
+    Tenant,
+)
+from aegis.services.entitlement_service import resolve_service_entitlements_for_user
 from aegis.services.farm_provisioning import load_temporary_farm_profiles
 from aegis.services.upstream_security import UpstreamPolicyError, validate_allowed_upstream
 from aegis.views.api.service_registry_views import (
@@ -616,3 +626,169 @@ class SelectMatchingServiceTests(SimpleTestCase):
         )
         self.assertIsNone(entry)
         self.assertTrue(matched)
+
+
+@override_settings(
+    GATEKEEPER_ALLOWED_UPSTREAMS=("http://127.0.0.1:8002/",),
+    GATEKEEPER_ALLOW_PRIVATE_UPSTREAMS=True,
+    GATEKEEPER_ALLOW_HTTP_UPSTREAMS=True,
+    GATEKEEPER_READ_ONLY_POST_ALLOWLIST=("pdm:api/v1/fuzzy-risk/fc/forecast/",),
+)
+class ReadOnlyUserTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.tenant = Tenant.objects.create(code="sip-read-only", slug="sip-read-only", name="Read Only SIP")
+        other_tenant = Tenant.objects.create(code="sip-other", slug="sip-other", name="Other SIP")
+
+        for code, name in (("FC", "Farm Calendar"), ("PDM", "Pest & Disease Management")):
+            service, _ = ServiceMaster.objects.get_or_create(service_code=code, defaults={"service_name": name})
+            for action in ("view", "add", "edit", "delete"):
+                PermissionMaster.objects.get_or_create(service=service, action=action)
+        self.fc_service = ServiceMaster.objects.get(service_code="FC")
+
+        self.farm_id = "11111111-1111-1111-1111-111111111111"
+        self.parcel_id = "22222222-2222-2222-2222-222222222222"
+        self.other_farm_id = "33333333-3333-3333-3333-333333333333"
+        FarmCalendarResourceCache.objects.create(
+            resource_type="farm", resource_id=self.farm_id, tenant=self.tenant
+        )
+        FarmCalendarResourceCache.objects.create(
+            resource_type="parcel", resource_id=self.parcel_id, farm_id=self.farm_id, tenant=self.tenant
+        )
+        FarmCalendarResourceCache.objects.create(
+            resource_type="farm", resource_id=self.other_farm_id, tenant=other_tenant
+        )
+
+        self.read_only_user = user_model.objects.create_user(
+            username="evaluator",
+            email="evaluator@example.com",
+            password="temporary-pass-123",
+            tenant=self.tenant,
+            is_read_only=True,
+        )
+        self.tenant_admin = user_model.objects.create_user(
+            username="read-only-tenant-admin",
+            email="read-only-tenant-admin@example.com",
+            password="temporary-pass-123",
+            tenant=self.tenant,
+            is_tenant_admin=True,
+        )
+
+        for service_name, endpoint, methods in (
+            ("farmcalendar", "api/v1/Farm/", ["GET", "POST"]),
+            ("farmcalendar", "api/v1/Farm/{farm_id}/", ["GET", "PATCH", "DELETE"]),
+            ("pdm", "api/v1/disease/", ["GET", "POST"]),
+            ("pdm", "api/v1/fuzzy-risk/fc/forecast/", ["POST"]),
+        ):
+            RegisteredService.objects.create(
+                base_url="http://127.0.0.1:8002/",
+                service_name=service_name,
+                endpoint=endpoint,
+                methods=methods,
+            )
+        self.client = APIClient()
+
+    @staticmethod
+    def _service(entitlements, code):
+        return next(service for service in entitlements if service["code"] == code)
+
+    @staticmethod
+    def _upstream_ok():
+        upstream_response = Mock(status_code=200, headers={"Content-Type": "text/plain"})
+        upstream_response.iter_content.return_value = iter([b"ok"])
+        return upstream_response
+
+    def _proxy_url(self, path):
+        return reverse("new_reverse_proxy", kwargs={"path": path})
+
+    def test_entitlements_are_view_only_and_cover_own_tenant_farms(self):
+        entitlements = resolve_service_entitlements_for_user(self.read_only_user)
+
+        fc = self._service(entitlements, "FC")
+        self.assertEqual(fc["actions"], ["view"])
+        self.assertEqual(fc["roles"], ["read_only"])
+        self.assertEqual(fc["scopes"], {"farm": [self.farm_id], "parcel": [self.parcel_id]})
+        self.assertTrue(all(a["actions"] == ["view"] for a in fc["assignments"]))
+        pdm = self._service(entitlements, "PDM")
+        self.assertEqual(pdm["actions"], ["view"])
+
+    def test_role_grant_cannot_give_read_only_user_write_actions(self):
+        ServiceScopeAssignment.objects.create(
+            tenant=self.tenant,
+            service=self.fc_service,
+            user=self.read_only_user,
+            role="editor",
+            actions=["view", "edit", "delete"],
+            scope_type="farm",
+            scope_id=self.farm_id,
+        )
+
+        fc = self._service(resolve_service_entitlements_for_user(self.read_only_user), "FC")
+
+        self.assertEqual(fc["actions"], ["view"])
+        self.assertTrue(all(a["actions"] == ["view"] for a in fc["assignments"]))
+
+    def test_other_users_keep_their_write_actions(self):
+        entitlements = resolve_service_entitlements_for_user(self.tenant_admin)
+
+        self.assertEqual(self._service(entitlements, "FC")["actions"], ["add", "delete", "edit", "view"])
+        self.assertEqual(self._service(entitlements, "PDM")["actions"], ["add", "delete", "edit", "view"])
+
+    def test_me_reports_read_only_flag(self):
+        self.client.force_authenticate(self.read_only_user)
+
+        response = self.client.get(reverse("api_me"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["user"]["is_read_only"])
+
+    def test_read_only_user_cannot_also_be_admin_or_staff(self):
+        for flags in ({"is_tenant_admin": True}, {"is_staff": True}, {"is_superuser": True}):
+            user = get_user_model()(
+                username="conflict", email="conflict@example.com", tenant=self.tenant, is_read_only=True, **flags
+            )
+            with self.assertRaises(ValidationError):
+                user.clean()
+
+    def test_proxy_refuses_writes_on_every_service(self):
+        self.client.force_authenticate(self.read_only_user)
+
+        with patch("aegis.views.api.service_registry_views.requests.request") as request_mock:
+            responses = [
+                self.client.post(self._proxy_url("farmcalendar/api/v1/Farm/"), {}, format="json"),
+                self.client.patch(self._proxy_url(f"farmcalendar/api/v1/Farm/{self.farm_id}/"), {}, format="json"),
+                self.client.delete(self._proxy_url(f"farmcalendar/api/v1/Farm/{self.farm_id}/")),
+                self.client.post(self._proxy_url("pdm/api/v1/disease/"), {}, format="json"),
+            ]
+
+        self.assertEqual([response.status_code for response in responses], [403, 403, 403, 403])
+        self.assertEqual(responses[0].json(), {"error": "This account is read-only."})
+        request_mock.assert_not_called()
+
+    def test_proxy_allows_reads_and_allowlisted_posts(self):
+        self.client.force_authenticate(self.read_only_user)
+
+        with patch(
+            "aegis.views.api.service_registry_views.requests.request",
+            side_effect=lambda *args, **kwargs: self._upstream_ok(),
+        ) as request_mock:
+            read_response = self.client.get(self._proxy_url("pdm/api/v1/disease/"))
+            forecast_response = self.client.post(
+                self._proxy_url("pdm/api/v1/fuzzy-risk/fc/forecast/"), {}, format="json"
+            )
+
+        self.assertEqual(read_response.status_code, 200)
+        self.assertEqual(forecast_response.status_code, 200)
+        self.assertEqual(request_mock.call_count, 2)
+
+    def test_proxy_still_forwards_writes_for_other_users(self):
+        self.client.force_authenticate(self.tenant_admin)
+
+        with patch(
+            "aegis.views.api.service_registry_views.requests.request",
+            return_value=self._upstream_ok(),
+        ) as request_mock:
+            response = self.client.post(self._proxy_url("pdm/api/v1/disease/"), {}, format="json")
+
+        self.assertEqual(response.status_code, 200)
+        request_mock.assert_called_once()

@@ -261,7 +261,8 @@ Authorization: Bearer <access_token>
     "tenant_code": "sip06",
     "tenant_name": "Precise Olive Irrigation Solution",
     "is_platform_admin": false,
-    "is_tenant_admin": true
+    "is_tenant_admin": true,
+    "is_read_only": false
   },
   "services": [
     {
@@ -292,6 +293,7 @@ Notes:
 
 - platform admins are returned with unrestricted service access
 - tenant admins receive implicit FC entitlement for their tenant
+- read-only users (`is_read_only: true`) receive implicit FC entitlement for their tenant, and every service is reduced to the `view` action with the `read_only` role
 - `assignments` reflects the exact entitlement rows used to derive the flattened `roles`, `actions`, and `scopes`
 
 ### 6. FarmCalendar Scopes
@@ -450,6 +452,18 @@ In practice this is used heavily for FarmCalendar:
 - `PATCH /api/proxy/farmcalendar/api/v1/Farm/<uuid>/?format=json`
 
 The proxy layer is where tenant, action, and scope enforcement is applied for protected service requests.
+
+For read-only users the proxy forwards `GET`, `HEAD` and `OPTIONS` to every service,
+and `POST` only to the routes in `GK_READ_ONLY_POST_ALLOWLIST`. Any other request is
+refused before it reaches the service:
+
+```json
+{
+  "error": "This account is read-only."
+}
+```
+
+with status `403`.
 
 ## Admin Login Behavior
 

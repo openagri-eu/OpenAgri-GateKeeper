@@ -511,6 +511,7 @@ class DefaultAuthUserExtendAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMix
         'tenant_display',
         'platform_admin_display',
         'is_tenant_admin',
+        'is_read_only',
         'uuid',
         'status_badge',
         'date_joined',
@@ -518,7 +519,7 @@ class DefaultAuthUserExtendAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMix
     )
     list_display_links = ('email',)
     search_fields = ('email', 'first_name', 'last_name', 'username', 'uuid')
-    list_filter = ('status', ('tenant', TenantCodeListFilter), 'is_tenant_admin', 'is_active', 'is_staff', 'is_superuser', 'date_joined', 'last_login')
+    list_filter = ('status', ('tenant', TenantCodeListFilter), 'is_tenant_admin', 'is_read_only', 'is_active', 'is_staff', 'is_superuser', 'date_joined', 'last_login')
     ordering = ('email',)
     date_hierarchy = 'date_joined'
     list_per_page = 50
@@ -531,7 +532,7 @@ class DefaultAuthUserExtendAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMix
             None,
             {
                 "classes": ("wide",),
-                "fields": ("username", "email", "tenant", "is_tenant_admin", "password1", "password2"),
+                "fields": ("username", "email", "tenant", "is_tenant_admin", "is_read_only", "password1", "password2"),
             },
         ),
         (
@@ -548,7 +549,7 @@ class DefaultAuthUserExtendAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMix
 
     actions = ("mark_active", "mark_inactive", "soft_delete_selected", "restore_selected", "export_as_csv")
     EXPORT_FIELDS = ("email", "first_name", "last_name", "username",
-                     "tenant.code", "is_tenant_admin",
+                     "tenant.code", "is_tenant_admin", "is_read_only",
                      "uuid", "status", "is_active", "is_staff", "is_superuser",
                      "date_joined", "last_login", "created_at", "updated_at", "deleted_at")
 
@@ -569,7 +570,7 @@ class DefaultAuthUserExtendAdmin(TenantScopedAdminMixin, HideDeletedByDefaultMix
                     and (request.user.is_superuser or f != 'is_superuser')
                 )
                 if name == "Permissions" and not is_add_form:
-                    fields = tuple(fields) + ("tenant", "is_tenant_admin")
+                    fields = tuple(fields) + ("tenant", "is_tenant_admin", "is_read_only")
                 opts['fields'] = fields
             cleaned.append((name, opts))
         if not has_lifecycle:

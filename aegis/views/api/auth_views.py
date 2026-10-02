@@ -231,6 +231,7 @@ class MeAPIView(APIView):
             "tenant_name": getattr(getattr(u, "tenant", None), "name", None),
             "is_platform_admin": bool(getattr(u, "is_superuser", False)),
             "is_tenant_admin": bool(getattr(u, "is_tenant_admin", False)),
+            "is_read_only": bool(getattr(u, "is_read_only", False)),
         }
 
         services_payload = resolve_service_entitlements_for_user(u)

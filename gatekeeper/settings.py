@@ -48,6 +48,31 @@ GATEKEEPER_FARM_PROVISION_TIMEOUT_SECONDS = max(
     1,
     int(os.getenv("GK_FARM_PROVISION_TIMEOUT_SECONDS", "10")),
 )
+# Proxy routes a read-only user may still POST to, as
+# "<registered service name>:<registered endpoint>". They only calculate or
+# generate reports and do not change stored data. Every other POST, PUT, PATCH
+# and DELETE through the proxy is refused for read-only users.
+_DEFAULT_READ_ONLY_POST_ALLOWLIST = (
+    "pdm:api/v1/fuzzy-risk/calculate/",
+    "pdm:api/v1/fuzzy-risk/forecast/",
+    "pdm:api/v1/fuzzy-risk/fc/forecast/",
+    "weather_data:api/v1/history/hourly/",
+    "weather_data:api/v1/history/daily/",
+    "reporting:api/v1/openagri-report/irrigation-report/",
+    "reporting:api/v1/openagri-report/compost-report/",
+    "reporting:api/v1/openagri-report/animal-report/",
+    "reporting:api/v1/openagri-report/fertilization-report/",
+    "reporting:api/v1/openagri-report/pesticides-report/",
+    "reporting:api/v1/openagri-report/standalone-observation-report/",
+    "reporting:api/v1/openagri-report/field-notebook/",
+)
+GATEKEEPER_READ_ONLY_POST_ALLOWLIST = tuple(
+    value.strip()
+    for value in os.getenv(
+        "GK_READ_ONLY_POST_ALLOWLIST", ",".join(_DEFAULT_READ_ONLY_POST_ALLOWLIST)
+    ).split(",")
+    if value.strip()
+)
 
 # geting from env var from now, but in the future this infos should
 # come with the service registration post request

@@ -5,6 +5,7 @@ import uuid
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, AbstractUser
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
@@ -116,6 +117,10 @@ class DefaultAuthUserExtend(AbstractUser, BaseModel):
         related_name='users',
     )
     is_tenant_admin = models.BooleanField(default=False)
+    is_read_only = models.BooleanField(
+        default=False,
+        help_text="Can view all data in their tenant but cannot add, edit or delete anything in any service.",
+    )
 
     history = HistoricalRecords(table_name="auth_user_extend_history")
 
@@ -126,6 +131,13 @@ class DefaultAuthUserExtend(AbstractUser, BaseModel):
 
     def __str__(self):
         return f"{self.email} {self.first_name}"
+
+    def clean(self):
+        super().clean()
+        if self.is_read_only and (self.is_superuser or self.is_staff or self.is_tenant_admin):
+            raise ValidationError(
+                "A read-only user cannot also be a platform admin, staff user or tenant admin."
+            )
 
     def _released_username(self):
         return f"deleted__{self.uuid.hex[:12]}__{self.username}"[:150]

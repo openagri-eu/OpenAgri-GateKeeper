@@ -8,6 +8,7 @@ import requests
 
 from typing import Optional, cast
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, DatabaseError
 from django.http import JsonResponse, StreamingHttpResponse
@@ -37,6 +38,7 @@ METHOD_ACTION_MAP = {
     "DELETE": "delete",
 }
 ALLOWED_PROXY_METHODS = frozenset(METHOD_ACTION_MAP)
+READ_ONLY_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def _normalize_service_key(value: Optional[str]) -> str:
@@ -46,6 +48,22 @@ def _normalize_service_key(value: Optional[str]) -> str:
 def _is_fc_service_name(value: Optional[str]) -> bool:
     normalized = _normalize_service_key(value)
     return normalized in FC_SERVICE_IDENTIFIERS or normalized == "farm calendar"
+
+
+def _read_only_request_allowed(method: str, service_entry) -> bool:
+    """Read-only users may use safe methods, and POST only to the routes in
+    GATEKEEPER_READ_ONLY_POST_ALLOWLIST."""
+    method = (method or "").upper()
+    if method in READ_ONLY_SAFE_METHODS:
+        return True
+    if method != "POST":
+        return False
+    route = f"{service_entry.service_name}:{(service_entry.endpoint or '').strip('/')}"
+    allowed_routes = set()
+    for item in getattr(settings, "GATEKEEPER_READ_ONLY_POST_ALLOWLIST", ()):
+        service_name, _, endpoint = item.partition(":")
+        allowed_routes.add(f"{service_name.strip()}:{endpoint.strip().strip('/')}")
+    return route in allowed_routes
 
 
 def _is_json_media_type(content_type: Optional[str]) -> bool:
@@ -860,6 +878,19 @@ class NewReverseProxyAPIView(APIView):
                 return JsonResponse({'error': 'No service can provide this resource.'}, status=404)
 
             LOG.debug("[GK][dispatch_request] matched endpoint '%s'", service_entry.endpoint)
+
+            if getattr(request.user, "is_read_only", False) and not _read_only_request_allowed(
+                request.method, service_entry
+            ):
+                LOG.warning(
+                    "GK PROXY DENY method=%s svc=%s path=%s user=%s reason=read_only corr=%s",
+                    request.method,
+                    service_entry.service_name,
+                    path,
+                    getattr(request.user, "username", "-"),
+                    corr_id,
+                )
+                return JsonResponse({"error": "This account is read-only."}, status=403)
 
             try:
                 upstream_base_url = validate_allowed_upstream(service_entry.base_url)

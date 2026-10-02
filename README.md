@@ -52,6 +52,11 @@ Admin types:
   - tenant-scoped admin access inside GK
 - normal tenant user
   - tenant-bound, non-admin user
+- read-only user
+  - `is_read_only=True` (cannot be combined with tenant admin, staff or platform admin)
+  - sees every FarmCalendar farm and parcel in their tenant, and every other service, with the `view` action only
+  - the proxy refuses their `PUT`, `PATCH` and `DELETE` requests, and `POST` requests outside `GK_READ_ONLY_POST_ALLOWLIST`
+  - intended for shared demo and evaluation accounts
 
 ## Main API Surface
 
@@ -134,6 +139,7 @@ Proxy upstream policy:
 - `GK_ALLOWED_UPSTREAMS` — comma-separated exact service origins, including ports and trailing slashes
 - `GK_ALLOW_PRIVATE_UPSTREAMS` — explicitly permit allowlisted private/Docker-network addresses
 - `GK_ALLOW_HTTP_UPSTREAMS` — explicitly permit allowlisted plain-HTTP origins
+- `GK_READ_ONLY_POST_ALLOWLIST` — comma-separated `<service name>:<registered endpoint>` routes that read-only users may still `POST` to (calculations and report generation). Defaults to the PDM fuzzy-risk calculations, weather history and reporting routes; see `gatekeeper/settings.py`
 
 Temporary registration provisioning:
 

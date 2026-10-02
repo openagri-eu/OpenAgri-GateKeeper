@@ -11,6 +11,8 @@ from aegis.models import (
 
 
 FC_SERVICE_IDENTIFIERS = {"farmcalendar", "fc"}
+READ_ONLY_ROLE = "read_only"
+READ_ONLY_ACTIONS = frozenset({"view"})
 
 
 def _normalize_service_key(value):
@@ -121,6 +123,8 @@ def _apply_tenant_user_entitlements(user, services):
       (unrestricted, all actions).
     - Tenant admins additionally get FC enumerated to every farm/parcel in
       their tenant. Non-admin users get FC only via explicit Role Grants.
+    - Read-only users get FC enumerated like tenant admins; all their actions
+      are later capped to ``view`` by ``_cap_to_read_only``.
     """
     tenant_id = getattr(user, "tenant_id", None)
     if not tenant_id:
@@ -129,16 +133,18 @@ def _apply_tenant_user_entitlements(user, services):
         return services
 
     is_tenant_admin = bool(getattr(user, "is_tenant_admin", False))
+    is_read_only = bool(getattr(user, "is_read_only", False))
+    tenant_wide_role = READ_ONLY_ROLE if is_read_only else "tenant_admin"
 
     active_services = ServiceMaster.objects.filter(status=1).values_list("service_code", "service_name")
     for service_code, service_name in active_services:
         is_fc = _is_fc_service(service_code, service_name)
-        if is_fc and not is_tenant_admin:
+        if is_fc and not (is_tenant_admin or is_read_only):
             continue
 
         entry = _ensure_service_entry(services, service_code, service_name)
-        if is_tenant_admin:
-            entry["roles"].add("tenant_admin")
+        if is_tenant_admin or is_read_only:
+            entry["roles"].add(tenant_wide_role)
 
         permission_actions = PermissionMaster.objects.filter(
             status=1,
@@ -158,16 +164,34 @@ def _apply_tenant_user_entitlements(user, services):
             for scope_type, scope_id in fc_rows:
                 _append_assignment(
                     entry,
-                    role="tenant_admin",
+                    role=tenant_wide_role,
                     actions=sorted(entry["actions"]),
                     scope_type=scope_type,
                     scope_id=scope_id,
-                    source="tenant_admin",
+                    source=tenant_wide_role,
                 )
         else:
             entry["unrestricted"] = True
 
     return services
+
+
+def _cap_to_read_only(services):
+    """Strip every action except ``view`` from a read-only user's entitlements,
+    including actions that came from explicit Role Grants."""
+    for entry in services.values():
+        entry["actions"] &= READ_ONLY_ACTIONS
+        kept = []
+        for assignment in entry["assignments"]:
+            assignment["actions"] = [a for a in assignment["actions"] if a in READ_ONLY_ACTIONS]
+            if assignment["actions"]:
+                kept.append(assignment)
+        entry["assignments"] = kept
+        entry["roles"] = {READ_ONLY_ROLE} | {a["role"] for a in kept if a["role"]}
+        entry["scopes"] = defaultdict(set)
+        for assignment in kept:
+            if assignment["scope_type"] and assignment["scope_id"]:
+                entry["scopes"][assignment["scope_type"]].add(assignment["scope_id"])
 
 
 def resolve_service_entitlements_for_user(user):
@@ -238,6 +262,9 @@ def resolve_service_entitlements_for_user(user):
             scope_id=scope_id,
             source="user" if user_id else ("group" if group_id else "unknown"),
         )
+
+    if getattr(user, "is_read_only", False):
+        _cap_to_read_only(services)
 
     normalized = []
     for _, data in sorted(services.items()):
